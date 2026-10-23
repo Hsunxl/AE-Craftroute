@@ -39,28 +39,6 @@ public abstract class CraftingServiceMixin {
     /** Set while a failed VM request is retried through the original (native) crafting path. */
     private static final ThreadLocal<Boolean> VM_FALLBACK = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
-    /**
-     * (v1.11.x PATTERN-REFRESH) Every time ANY crafting provider's node is refreshed on
-     * the network (e.g. pattern provider inventory changed → ICraftingProvider.requestUpdate
-     * → refreshNodeCraftingProvider), bump the global pattern version. This clears the
-     * CraftingVM's stale JIT bundleCache on the next execute().
-     *
-     * This is a more RELIABLE hook than PatternProviderLogicMixin.onUpdatePatterns:
-     * third-party mods (ExtendedAE, AdvancedAE, etc.) that add/override their own pattern
-     * provider logic may NOT route through PatternProviderLogic.updatePatterns(), but they
-     * ALL call ICraftingProvider.requestUpdate() → refreshNodeCraftingProvider() to
-     * notify the network. Without this hook, those provider updates never bump the
-     * pattern version → bundleCache stays stale → a newly-added intermediate pattern
-     * is never re-resolved in the chain.
-     */
-    @Inject(method = "refreshNodeCraftingProvider", at = @At("TAIL"))
-    private void vmRefreshNodeCraftingProvider(IGridNode node, CallbackInfo ci) {
-        com.ae2vm.addon.compiler.PatternCompiler.bumpPatternVersion();
-        // (v1.13.6 COMPILE-TIME HIT) Pattern set changed on this grid: kick the debounced
-        // background re-plan of hot outputs so the next request is a warm hit.
-        com.ae2vm.addon.api.AE2VMCrafting.onPatternsChanged(this.grid);
-    }
-    
     /** True if the requester belongs to a third-party mod that has NOT opted in to AE2 VM. */
     private boolean isUnregisteredThirdPartyRequester(ICraftingSimulationRequester simRequester) {
         if (simRequester == null) return false;

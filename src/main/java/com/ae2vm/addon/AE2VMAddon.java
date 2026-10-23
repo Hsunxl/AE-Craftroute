@@ -17,20 +17,19 @@ import java.util.Set;
 
 /**
  * AE2 VM Crafting Accelerator - Main Mod Class
- * 
- * Replaces AE2's recursive crafting calculation with a stack-based virtual machine.
- * 
- * PERFORMANCE IMPROVEMENTS:
- * 1. Patterns are compiled ONCE to flat bytecode (no per-request recursion)
- * 2. Execution is simple linear bytecode interpretation (O(n) not O(recursion depth))
- * 3. No stack overflow for deep crafting trees (37+ patterns deep)
- * 4. No repeated pattern lookups during calculation
- * 5. VM instances are cached and reused
- * 
+ *
+ * Replaces AE2's recursive crafting calculation with one certified production planner.
+ *
+ * <p>Planning is a single backward-coverability search over the network's patterns and
+ * stock that accounts for inventory, so cyclic recipes, incremental yields and reuse of
+ * already-produced items are all part of the same proof. The result carries an executable
+ * program; the CPU mixins execute that program in order and reserve feedback items
+ * instead of delivering them too early.</p>
+ *
  * Architecture:
- * - PatternCompiler: traverses pattern tree ONCE, inlines all sub-patterns
- * - CraftingBytecode: flat, serializable instruction list
- * - CraftingVM: stack-based interpreter, executes bytecode in tight loop
+ * - RouteSnapshot: one consistent pattern/stock snapshot of the grid
+ * - NetworkProductionPlanner: certified planner (feasible / unreachable / undecided)
+ * - CertifiedCraftingPlan: the plan plus its executable program
  * - Mixin: hooks into ICraftingService.beginCraftingCalculation()
  */
 @Mod(AE2VMAddon.MOD_ID)

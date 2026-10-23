@@ -72,15 +72,4 @@ class AdvancedGrowthMixinContractTest {
         var setter = method(access, "ae2vm$setTasks", "(Ljava/util/Map;)V");
         assertTrue(setter.visibleAnnotations.stream().anyMatch(a -> a.desc.equals("Lorg/spongepowered/asm/mixin/Mutable;")));
     }
-    @Test void exactSavedFailureTopologyCompletesWithRealSeedAndFeedback() {
-        var f = EntroGrowthPatchTest.fixture(0, 32, 1000000, false);
-        var plan = EntroGrowthPatchTest.plan(f, 1000);
-        assertFalse(plan.simulation());
-        assertEquals(32L, plan.usedItems().get(EntroGrowthPatchTest.R));
-        assertEquals(32L, plan.patternTimes().get(f.patterns().get(EntroGrowthPatchTest.R)));
-        assertEquals(1024L, plan.patternTimes().get(f.patterns().get(EntroGrowthPatchTest.D)));
-        for (boolean reversed : new boolean[]{false, true})
-            EntroGrowthPatchTest.executeCpuModel(plan, reversed, true);
-        assertThrows(AssertionError.class, () -> EntroGrowthPatchTest.executeCpuModel(plan, false, false));
-    }
 }

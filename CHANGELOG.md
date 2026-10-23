@@ -1,5 +1,62 @@
 # Changelog / 更新日志
 
+## [1.13.19-local.32] - 2026-10-24（通用生产计划器取代字节码引擎）
+
+  这一版把合成计算从「栈式虚拟机执行预编译字节码」整体换成**一次可证明的生产计划搜索**，
+  并删除旧引擎全部代码。行为面向循环配方 / 增量净产出 / 真实执行顺序。
+
+  ### 修正的三类结构性问题
+
+  - **循环配方**（`A→B`、`B→2A` 回料环）：旧递归展开要么无限展开要么直接判失败；
+    现在在库存记账里自然成立，多轮回料可以反复使用同一批中间产物。
+  - **增量 / 净产出**：产物又参与自身配方时，只有净增量才是真实需求，不再被当成一次性消耗。
+  - **真实可执行顺序**：回料必须在装配室之间按顺序流转，计划携带可执行程序，CPU 按序派单。
+
+  ### 伪缺料消除
+
+  - 结论严格四分：`feasible` / `UNREACHABLE`（真做不到）/ `LIMIT`（预算内未判定，**不是缺料**）/
+    `UNSUPPORTED`（无法精确建模，**未按缺料处理**）。只有 `UNREACHABLE` 才说缺料。
+  - 计划只有在**前向重放校验**通过后才返回：每一步的输入在执行那一刻确实够用，
+    因此 `missingItems()` 恒为空——计划本身就是可执行性的证明。
+
+  ### 画布（新增）
+
+  - **权威校验**：画布显示的可行性、起手清单、批次数量全部来自服务端同一个认证计划器
+    （`RouteSnapshot` 是画布预览与真正下单的唯一快照来源），不是客户端估算。
+  - **按材料锁定**：逐节点指定"这个材料用这张样板"，选择原样进入服务端计算。
+  - **整幅原子应用**：所有节点的选择作为一个整体提交，服务端逐个校验后一次性应用。
+  - **冲突逐节点诊断**：同一材料被指定两张不同样板时不静默挑一个，而是点名冲突材料；
+    选中的样板已不在网络里也会单独指出。
+
+  ### 执行层
+
+  - CPU 按认证程序顺序派单；回料留在 CPU 库存供下一轮复用；
+    等 `waitingFor` 清空、程序走完才把最终产物交付给请求方。
+  - 程序与游标随 CPU NBT 持久化，**真实停服重启后可从存档恢复在途作业并完成交付**。
+  - requester 只接受一部分产物时按实际接受量分次交付，不丢料也不提前结束作业。
+  - AE2 合成 CPU 与 AdvancedAE 量子计算机共用同一套执行桥。
+
+  ### 删除的死代码（旧字节码引擎）
+
+  - 类：`vm/CraftingVM.java`、`vm/CraftingBytecode.java`、`vm/Opcode.java`、
+    `vm/AlternativePatternSearch.java`、`vm/ManualRoutePlanner.java`、`compiler/PatternCompiler.java`。
+  - mixin：`mixin/PatternProviderLogicMixin.java`（整类只做样板预编译），并从 `ae2vm.mixins.json` 移除。
+  - `api/AE2VMCrafting.java` 从 995 行重写为约 150 行：删掉 `VM_CACHE`、`tryWarmPlan`、
+    `hotRecompute`、`onPatternsChanged`、热输出预热、库存快照缓存、重试窗口、
+    `wouldCauseCycle`/`computeCycleBoundKeys`/`tarjanScc`、`rebindStalePatterns` 等全部失效逻辑。
+  - `vm/TwoNodeGrowthPlanner.java` 196 行 → 约 120 行，只保留仍被 CPU mixin 使用的
+    `containsRing` / `prioritizeFeedback`。
+  - 保留（仍被 live 代码使用）：`compiler/IFiniteUseInput.java`、`vm/NetProduction.java`、
+    `vm/FeedbackReservation.java`。
+  - 随之删除 32 个只测旧引擎的测试文件。
+
+  ### 验证
+
+  - 离线：**189 tests / 0 failures**（原 700 个中 511 个只覆盖已删除的字节码引擎）。
+  - 真实网格（独立实例）：三节点回料环（绿宝石→钻石→2 青金石→绿宝石），
+    1 个绿宝石请求 3 个钻石 → 交付 3 个、库存清零；取消、存档往返、
+    **真实服务器重启续跑**、requester 部分接受、AdvancedAE 量子计算机执行。
+
 ## [1.13.19] - 2026-09-15（多笔订单卡死：样板实例失效 → 计划不可投递）
 
   从 VM-GTL v1.12.58 反向移植（该修复已在 GTL 整合包实测确认消除卡死）。
