@@ -1,0 +1,34 @@
+{
+    "required": true,
+    "minVersion": "0.8",
+    "package": "com.ae2vm.addon.mixin",
+    "compatibilityLevel": "JAVA_21",
+    "mixins": [
+        "CraftingServiceMixin",
+        "PatternProviderLogicMixin",
+        "CraftingSimulationStateAccessor",
+        "GrowthJobAccessor",
+        "GrowthTaskAccessor",
+        "GrowthCpuMixin",
+        "ProductionCpuMixin",
+        "GrowthTimeAccessor",
+        "AdvancedGrowthJobAccessor",
+        "AdvancedGrowthTaskAccessor",
+        "AdvancedGrowthTimeAccessor",
+        "AdvancedGrowthCpuMixin",
+        "AdvancedProductionCpuMixin",
+        "RouteMenuAccessor",
+        "CraftConfirmRouteAccessor"
+    ],
+    "client": [
+        "RouteTreeWidgetMixin",
+        "RouteToolbarAccessor"
+    ],
+    "server": [],
+    "injectors": {
+        "defaultRequire": 1
+    },
+    "mixinextras": {
+        "minVersion": "0.5.3"
+    }
+}

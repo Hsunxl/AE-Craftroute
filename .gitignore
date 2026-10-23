@@ -1,0 +1,21 @@
+# IDE
+.idea/
+.vscode/
+.eclipse/
+
+# Build
+build/
+bin/
+.gradle/
+.gradle-home/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.jar
+run/
+run-selftest/
+logs/
+*.log
