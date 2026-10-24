@@ -156,7 +156,59 @@ if (CraftRouteCrafting.isLoaded()) {
 
 ---
 
-## 8. Project structure
+## 8. VM kernel and performance optimization
+
+To improve planning performance for large batch crafting requests, this extension implements a numeric VM kernel as a candidate-path optimization.
+
+### 8.1 VM kernel architecture
+
+**Design goal.** Attempt constructive forward batch hints before backward search to quickly find feasible crafting batch sequences. This hint serves only as a candidate and must pass independent `certify()` validation before acceptance.
+
+**Core components.**
+
+- **`NumericProgramCompiler`**: Compiles the pattern graph into compact bytecode programs. Uses sparse instruction encoding, emitting only non-zero quantity keys. Opcodes include:
+  - `CHECK_PREFIX` (1): Check if inventory prefix satisfies input requirements
+  - `LIMIT_OUTPUT` (2): Limit output to prevent overflow
+  - `APPLY_DELTA` (3): Apply net change amounts
+  - `RECORD_PATTERN` (4): Record pattern usage
+  - `HALT` (5): Atomic commit
+
+- **`CompiledNumericProgram`**: Immutable request-local bytecode containing instruction arrays, operands, constant pool, and entry points.
+
+- **`NumericCraftingVM`**: Executes compiled programs. Atomic semantics: all writes affect a private copy, visible only at `HALT`. Supports catalyst/seed semantics (`count=min(count, 1+(working-key-input)/-delta)`).
+
+- **`NetDeltaOracle`**: Pure-data lower bound analysis computing net gain for each material. Used only for lower bound estimation, never for pruning, ordering, or feasibility proofs.
+
+### 8.2 Candidate path mechanism
+
+**Workflow.**
+
+1. `ProductionPlanner.probe()` calls `NumericProgramCompiler` to compile the pattern graph before backward search (within the same budget).
+2. Calls `NumericCraftingVM.execute()` for each candidate batch to simulate execution.
+3. Constructs a candidate crafting word (word) containing the target and all batch steps.
+4. **Mandatory independent verification**: `certify(witness, target, increment, explored)` performs forward replay from scratch, checking if inputs are satisfied at each step's execution time.
+5. Only when `certified.status==FEASIBLE` and budget has not expired, the candidate is accepted.
+
+**Key guarantees.**
+
+- ✅ **Candidate word never replaces proof**: VM results must pass independent `certify()` verification
+- ✅ **Limits never relaxed**: probe budget and search budget share the same deadline
+- ✅ **Atomic execution**: VM execution failures never pollute inventory
+- ✅ **Exact overflow protection**: Uses `addExact`/`multiplyExact` to prevent silent overflow
+
+### 8.3 Performance characteristics
+
+- **Hot path optimization**: 1000/1360/2000 quantity requests complete in 1-3 ms (after warmup)
+- **Cold start**: 256-stage chains fall back to backward search within 605-619 ms
+- **Budget control**: `probeExpired(allowance)` = `expired() || System.nanoTime()-started>=allowance`
+
+### 8.4 Relationship with old VM
+
+Version `1.13.19-local.32` removed the old stack-based VM engine (`CraftingVM`, `CraftingBytecode`, `Opcode`, etc.). The new VM kernel is a completely independent implementation, serving only as a candidate-path optimization without affecting the main search algorithm.
+
+---
+
+## 9. Project structure
 
 ```
 src/main/java/com/aecraftroute/addon/
@@ -196,7 +248,7 @@ src/main/resources/
 
 ---
 
-## 9. Building and testing
+## 10. Building and testing
 
 ```bash
 # Single build; output in build/libs/
@@ -217,6 +269,6 @@ The current offline regression is 38 suites and 271 tests, with 0 failures, 0 er
 
 ---
 
-## 10. License and acknowledgement
+## 11. License and acknowledgement
 
 Licensed under LGPL-3.0; the full text is in [LICENSE](LICENSE). Version history is in [CHANGELOG.md](CHANGELOG.md). The use and licensing of third-party work are in [ATTRIBUTIONS.md](ATTRIBUTIONS.md); the history of the earlier implementation is in [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).

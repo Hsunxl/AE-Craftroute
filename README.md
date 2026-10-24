@@ -155,7 +155,59 @@ if (CraftRouteCrafting.isLoaded()) {
 
 ---
 
-## 八、项目结构
+## 八、VM 内核与性能优化
+
+为提升大批量合成请求的规划性能，本扩展实现了数值化 VM 内核作为候选路径优化。
+
+### 8.1 VM 内核架构
+
+**设计目标。** 在反向搜索之前尝试构造性前向批处理提示，快速找到可行的合成批次序列。该提示仅作为候选，必须通过独立的 `certify()` 验证才能被采纳。
+
+**核心组件。**
+
+- **`NumericProgramCompiler`**：将样板图编译为紧凑的字节码程序。采用稀疏指令编码，仅发射非零数量的键。操作码包括：
+  - `CHECK_PREFIX` (1)：检查库存前缀是否满足输入需求
+  - `LIMIT_OUTPUT` (2)：限制产出避免溢出
+  - `APPLY_DELTA` (3)：应用净变化量
+  - `RECORD_PATTERN` (4)：记录样板使用
+  - `HALT` (5)：原子提交
+
+- **`CompiledNumericProgram`**：不可变的请求本地字节码，包含指令数组、操作数、常量池和入口点。
+
+- **`NumericCraftingVM`**：执行编译后的程序。原子语义：所有写操作影响私有副本，仅在 `HALT` 时可见。支持催化剂/种子语义（`count=min(count, 1+(working-key-input)/-delta)`）。
+
+- **`NetDeltaOracle`**：纯数据下界分析，计算每种材料的净增益。仅用于下界估计，不参与剪枝、排序或可行性证明。
+
+### 8.2 候选路径机制
+
+**工作流程。**
+
+1. `ProductionPlanner.probe()` 在反向搜索前调用 `NumericProgramCompiler` 编译样板图（在相同预算内）。
+2. 为每个候选批次调用 `NumericCraftingVM.execute()` 模拟执行。
+3. 构造候选合成词（word），包含目标和所有批次步骤。
+4. **强制独立验证**：`certify(witness, target, increment, explored)` 从零开始正向重放，检查每一步的输入在执行时刻是否满足。
+5. 仅当 `certified.status==FEASIBLE` 且预算未超时，才采用该候选。
+
+**关键保证。**
+
+- ✅ **候选词从不替代证明**：VM 结果必须通过 `certify()` 独立验证
+- ✅ **Limits 未放宽**：probe 预算与搜索预算共享同一 deadline
+- ✅ **原子执行**：VM 执行失败不污染库存
+- ✅ **精确溢出保护**：使用 `addExact`/`multiplyExact` 避免静默溢出
+
+### 8.3 性能特性
+
+- **热路径优化**：1000/1360/2000 数量请求在 1-3 ms 内完成（预热后）
+- **冷启动**：256 阶段链在 605-619 ms 内回退到反向搜索
+- **预算控制**：`probeExpired(allowance)` = `expired() || System.nanoTime()-started>=allowance`
+
+### 8.4 与旧 VM 的关系
+
+版本 `1.13.19-local.32` 移除了旧的栈式 VM 引擎（`CraftingVM`、`CraftingBytecode`、`Opcode` 等）。新 VM 内核是完全独立的实现，仅作为候选路径优化，不影响主搜索算法。
+
+---
+
+## 九、项目结构
 
 ```
 src/main/java/com/aecraftroute/addon/
@@ -195,7 +247,7 @@ src/main/resources/
 
 ---
 
-## 九、构建与测试
+## 十、构建与测试
 
 ```bash
 # 单次构建，产物位于 build/libs/
@@ -216,6 +268,6 @@ gradlew productionBenchmark       # 生产计划器微基准
 
 ---
 
-## 十、许可与致谢
+## 十一、许可与致谢
 
 本项目以 LGPL-3.0 授权，全文见 [LICENSE](LICENSE)。版本历史见 [CHANGELOG.md](CHANGELOG.md)。第三方作品的引用方式与授权见 [ATTRIBUTIONS.md](ATTRIBUTIONS.md)，早期实现的历史见 [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md)。
