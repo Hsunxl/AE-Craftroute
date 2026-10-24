@@ -19,3 +19,4 @@ run/
 run-selftest/
 logs/
 *.log
+run-qa/

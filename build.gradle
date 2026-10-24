@@ -4,17 +4,11 @@ plugins {
 }
 
 group = mod_group_id
-// jar 版本带 loader+MC 后缀：ae2vm-<ver>_neoforge_1.21.1.jar / ae2vm-nodetect-<ver>_neoforge_1.21.1.jar
-// （与 Forge 1.20.1 兄弟项目 ae2vm-<ver>_forge_1.20.1.jar 命名风格一致）
+// jar name carries the loader and Minecraft version: aecraftroute-<ver>_neoforge_1.21.1.jar
 version = "${mod_version}_neoforge_${minecraft_version}"
 
-// blockedMode: 'crash'(默认) → 检测到该作者 mod 游戏闪退；'warn' → 只警告不闪退
-// 每次编译出两个版本：ae2vm-<ver>.jar（crash / 针对检测）+ ae2vm-nodetect-<ver>.jar（warn / 无针对检测）
-def blockedMode = providers.gradleProperty('blockedMode').getOrElse('crash')
-def modArchiveName = blockedMode == 'warn' ? 'ae2vm-nodetect' : mod_id
-
 base {
-    archivesName = modArchiveName
+    archivesName = mod_id
 }
 
 java {
@@ -28,7 +22,7 @@ neoForge {
     version = neoforge_version
 
     mods {
-        ae2vm {
+        aecraftroute {
             sourceSet sourceSets.main
         }
     }
@@ -41,22 +35,31 @@ neoForge {
         client {
             client()
         }
+        qaClient {
+            client()
+            gameDirectory = project.file('run-qa')
+            jvmArguments.add('-Daecraftroute.qa=true')
+            programArguments.addAll('--quickPlaySingleplayer', 'AE-Craftroute-QA', '--width', '1280', '--height', '800')
+        }
         server {
             server()
         }
         // Independent verification instance: own game directory and world (run-selftest/),
-        // never the installed pack. Active only with -Dae2vm.selftest; see SelftestHarness.
+        // never the installed pack. Active only with -Daecraftroute.selftest; see SelftestHarness.
         selftestServer {
             server()
             gameDirectory = project.file('run-selftest')
-            jvmArguments.add('-Dae2vm.selftest=1')
-            jvmArguments.add('-Dae2vm.selftest.exit=true')
-            jvmArguments.add("-Dae2vm.selftest.task=${providers.gradleProperty('selftestTask').getOrElse('growth')}")
+            jvmArguments.add('-Daecraftroute.selftest=1')
+            jvmArguments.add('-Daecraftroute.selftest.exit=true')
+            jvmArguments.add("-Daecraftroute.selftest.task=${providers.gradleProperty('selftestTask').getOrElse('growth')}")
         }
     }
 }
 
 dependencies {
+    if (providers.gradleProperty('uiQa').isPresent()) {
+        runtimeOnly files('../../../mods/jei-1.21.1-neoforge-19.57.0.446.jar')
+    }
     compileOnly files('../../../mods/ae2jeiintegration-1.2.1.jar')
     // Optional AdvancedAE quantum CPU bridge; compile-only, supplied by the installed instance.
     def advancedaeJar = providers.gradleProperty('advancedaeJar').getOrElse('../../../mods/AdvancedAE-1.6.12-1.21.1.jar')
@@ -74,18 +77,10 @@ dependencies {
     testRuntimeOnly files(providers.gradleProperty('ae2ctJar').getOrElse('../../../mods/ae2ct-1.21.1-1.1.1.jar'))
     implementation "org.appliedenergistics:appliedenergistics2:${ae2_version}"
     compileOnly "io.github.llamalad7:mixinextras-neoforge:0.5.3"
-    // Thunderbolt-Core（弱依赖 / 可选前置，compileOnly）：未安装也能正常运行。
-    // 装了且通过 /thunderbolt engine ae2vm 选中本引擎时，才把 AE2 合成计算路由到 VM；
-    // 未选中则不走 VM（交给 Thunderbolt/原版）。neoforge.mods.toml 不声明硬依赖。
-    // Thunderbolt-Core 弱依赖 (compileOnly, optional)：API 接口来自 jar (com.moakiee.thunderbolt.api.crafting.*)。
-    // 下面 37 个 source 文件位于 src/main/java/com/moakiee/thunderbolt/core/crafting/ —— 是 AE2VMAddon 的
-    // "VM 测试套件" reference framework（VM 自身测试如 Ae2VmReferenceCapabilitySuiteTest 引用这些类），
-    // 编译时 Gradle source class 优先于 jar（同名时 main 编译产物覆盖 jar 中的 class），
-    // 故不需要 exclude —— 2.0-alpha jar 提供接口，main source 提供 core.crafting.* 实现。
-    // (v1.13.16+) Thunderbolt-Core algorithm library was stubbed out.
-    // Re-enable: git restore ThunderboltCompat + AE2VMBatchCraftingPlanner from v1.13.15,
-    // uncomment registerIfPresent() in AE2VMAddon.java, then uncomment:
-    compileOnly files('E:/TB ThirdParty/Thunderbolt-Core/build/libs/thunderbolt-2.0-alpha.jar')
+    // Thunderbolt-Core was an optional compile-only dependency up to v1.13.15. Since v1.13.16
+    // its algorithm library is stubbed out (com.aecraftroute.addon.compat.thunderbolt), nothing in the
+    // sources references it, and no artifact is needed to build. Re-enabling it means restoring
+    // the v1.13.15 sources and the dependency together, so nothing is declared here.
 
     testImplementation 'org.spongepowered:mixin:0.8.5'
     testImplementation platform('org.junit:junit-bom:5.10.2')
@@ -108,22 +103,35 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 tasks.named('test', Test) {
-    useJUnitPlatform()
-    // 打印 [reference-capability] 结果行到控制台（AE2VM 参考能力速度基准）
+    useJUnitPlatform { excludeTags 'benchmark' }
+    // 打印 [reference-capability] 结果行到控制台（AE-Craftroute 参考能力速度基准）
     testLogging {
         showStandardStreams = true
     }
 }
 
-// Correctness regression suite, explicitly separate from the upstream sub-microsecond timing assertions.
-// The ordinary `test` task above is unchanged and still includes all benchmarks.
+// Correctness regressions are separate from opt-in performance measurements.
 tasks.register('routeFunctionalTest', Test) {
     dependsOn tasks.named('testClasses')
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
-    useJUnitPlatform()
+    useJUnitPlatform { excludeTags 'benchmark' }
     jvmArgs '-Xverify:all'
     exclude '**/PerformanceBenchmark.class'
+}
+
+tasks.register('productionBenchmark', Test) {
+    dependsOn tasks.named('testClasses')
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'benchmark' }
+    maxParallelForks = 1
+    minHeapSize = '512m'
+    maxHeapSize = '2g'
+    systemProperty 'aecraftroute.benchmark.warmups', providers.gradleProperty('benchmarkWarmups').getOrElse('10')
+    systemProperty 'aecraftroute.benchmark.samples', providers.gradleProperty('benchmarkSamples').getOrElse('30')
+    testLogging { showStandardStreams = true }
+    outputs.upToDateWhen { false }
 }
 
 // 构建戳：同名版本号的两次构建必须能区分开（曾因此让玩家一直跑旧包）。
@@ -138,7 +146,7 @@ tasks.register('generateBuildStamp') {
     inputs.property('version', ver)
     inputs.property('stamp', stamp)
     doLast {
-        def f = out.get().file('ae2vm-build.properties').asFile
+        def f = out.get().file('aecraftroute-build.properties').asFile
         f.parentFile.mkdirs()
         f.text = "# generated by generateBuildStamp\nversion=${ver}\nbuilt=${stamp}\n"
     }
@@ -156,56 +164,25 @@ tasks.named('processResources', ProcessResources) {
             ae2_version_range      : ae2_version_range
     ]
     inputs.properties replaceProperties
-    inputs.property('blockedMode', blockedMode)
 
     filesMatching('META-INF/neoforge.mods.toml') {
         expand replaceProperties
-    }
-
-    // 把 blockedMode(crash/warn) 展开进 ae2vm/blockedmode.txt，打包进 jar，运行时可读
-    filesMatching('ae2vm/blockedmode.txt') {
-        expand([blockedMode: blockedMode])
     }
 }
 
 tasks.named('compileJava', JavaCompile) {
     options.compilerArgs += [
-        '-Amixin.refmap=ae2vm.refmap.json'
+        '-Amixin.refmap=aecraftroute.refmap.json'
     ]
 }
 
-// The selftest harness exists only for the independent verification instance; it is
-// compiled into the dev classpath (so the server run can load it) but never shipped.
+// The selftest harness and the QA fixtures exist only for the independent
+// verification instances; both are compiled into the dev classpath (so the server
+// and client runs can load them) but neither is shipped in the release jar.
 tasks.named('jar', Jar) {
-    exclude 'com/ae2vm/addon/selftest/**'
+    exclude 'com/aecraftroute/addon/selftest/**'
+    exclude 'com/aecraftroute/addon/route/RouteQaFixtures*'
 }
 
-// Auto-copy compiled JAR to Minecraft mods folder after build
-// Remove all old versions of this mod before copying the new one
-// 只删当前变体的旧 jar，保留另一个变体（crash 变体不会误删 nodetect 变体）
-// 属性在 doLast 外捕获成局部变量（doLast 里拿不到配置期的 mod_version/modArchiveName 值）
-tasks.register('cleanOldJars') {
-    def modsDir = java.nio.file.Path.of('E:/MC/.minecraft/versions/NAST hard d0.9.1 beta3/mods')
-    // crash 变体(ae2vm) → ae2vm-<数字>.jar；warn 变体(ae2vm-nodetect) → ae2vm-nodetect-*.jar
-    def glob = modArchiveName == 'ae2vm' ? 'ae2vm-[0-9]*.jar' : "${modArchiveName}-*.jar"
-    doLast {
-        java.nio.file.Files.newDirectoryStream(modsDir, glob).withCloseable { stream ->
-            stream.each { java.nio.file.Files.deleteIfExists(it) }
-        }
-    }
-}
+// Building never deploys into a Minecraft instance. Deploy explicitly after verification.
 
-tasks.register('copyJarToMods', Copy) {
-    dependsOn tasks.named('jar')
-    dependsOn 'cleanOldJars'
-    from tasks.named('jar').flatMap { it.archiveFile }
-    into 'E:/MC/.minecraft/versions/NAST hard d0.9.1 beta3/mods'
-    doLast {
-        logger.lifecycle("Copied JAR to mods folder")
-    }
-}
-
-// Hook into the build lifecycle: build → copyJarToMods
-tasks.named('build') {
-    finalizedBy 'copyJarToMods'
-}

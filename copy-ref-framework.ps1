@@ -1,6 +1,15 @@
+# 从本地 Thunderbolt-Core 检出复制参考规划器源码到测试目录。
+# 需要显式提供来源与目标路径，不在脚本中固定任何本机目录。
+param(
+    [Parameter(Mandatory = $true)][string]$Source,
+    [Parameter(Mandatory = $true)][string]$Destination
+)
+
 $ErrorActionPreference = 'Stop'
-$src = 'E:\Applied Energistics 2 Acceleration\_tb_src\Thunderbolt-Core-feature-generic-conflict-solver\src'
-$dst = 'e:\Applied Energistics 2 Acceleration\AE2VMAddon\src\test\java'
+$src = $Source
+$dst = $Destination
+
+if (-not (Test-Path $src)) { throw "Source path does not exist: $src" }
 
 $plannerFiles = @(
   'CraftGraph.java', 'CraftPattern.java', 'CraftInput.java', 'CraftOutput.java',

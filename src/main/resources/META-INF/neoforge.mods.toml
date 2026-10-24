@@ -6,19 +6,13 @@ license="LGPL-3.0"
 modId="${mod_id}"
 version="${mod_version}"
 displayName="${mod_name}"
-logoFile="ae2vm.png"
-authors="Tao  QQ 2584300846"
+logoFile="aecraftroute.png"
+authors="Tao"
 description='''
-Replaces AE2 recursive crafting calculation with a stack-based virtual machine for massive performance gains.
-
-Architecture:
-- Patterns are compiled to bytecode at encode time
-- BigInteger stack for unlimited precision
-- JIT bundle caching eliminates repeated subtree calculations
-- Binary decomposition for multiplier recipes (cts>1)
-- Memoization for repeated single-craft calls (cts=1)
-- 2,400x faster for deep crafting trees (90s -> 38ms)
-- Compatible with ECO crafting CPUs
+Certified net-production planning for AE2: cyclic recipes and feedback reuse with
+an executable ordered schedule, native and AdvancedAE CPU bridges, durable job
+persistence, exact plan caching, and a server-validated crafting canvas.
+Resource limits are reported as undecided rather than fabricated missing items.
 '''
 
 [[mixins]]
@@ -58,7 +52,7 @@ config="${mod_id}.mixins.json"
 #  com.moakiee.thunderbolt.api.crafting.{CraftingPlanningEngine,PlanningRequest,
 #  PlanningEngineSession,PlanningAttempt,PlanningAttemptContext,PlanningExitException,
 #  CraftingPlanningEngines,CraftingPlanningEngineDescriptor,PlanningChoice}）。
-# 引擎 ID "ae2vm" 通过 CraftingPlanningEngines.register 注册为可选私有算法。
+# 引擎 ID "aecraftroute" 通过 CraftingPlanningEngines.register 注册为可选私有算法。
 [[dependencies.${mod_id}]]
     modId="thunderbolt"
     type="optional"
@@ -66,10 +60,11 @@ config="${mod_id}.mixins.json"
     ordering="NONE"
     side="BOTH"
 
-# Configured（可选）：装了可在游戏内 Mod Configuration 界面编辑 config/ae2vm-common.toml；不装配置仍然生效
+# Configured（可选）：装了可在游戏内 Mod Configuration 界面编辑 config/aecraftroute-common.toml；不装配置仍然生效
 [[dependencies.${mod_id}]]
     modId="configured"
     type="optional"
     versionRange="[2,3)"
     ordering="NONE"
     side="BOTH"
+
