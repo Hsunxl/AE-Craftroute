@@ -279,9 +279,8 @@ public final class RouteScreen extends Screen {
     private RoutePlanView plan;
     private String lastPreviewSignature;
     private EditBox itemId;
-    /** Ticks at which the unanswered "begin" is re-sent; -1 means the server already answered. */
-    private long beginRetryAt = -1;
-    private int beginAttempts;
+    /** Retry state for the unanswered "begin"; see {@link BeginRetryState}. */
+    private final BeginRetryState beginRetry = new BeginRetryState();
 
     private int panelW, panelLeft, panelRight, canvasLeft, canvasRight, toolbarY, canvasTop, canvasBottom;
     private int panX, panY;
@@ -379,8 +378,7 @@ public final class RouteScreen extends Screen {
      * whole lifetime, which is exactly what "target=" in the opening log line was.
      */
     private void pressBegin() {
-        beginAttempts++;
-        if(send("begin",null,"")>0) beginRetryAt=ticks+RouteRequestRules.BEGIN_RETRY_FRAMES;
+        if(send("begin",null,"")>0) beginRetry.sent(ticks);
     }
 
     /**
@@ -389,15 +387,16 @@ public final class RouteScreen extends Screen {
      * when it does not, so an unanswered attempt must be repeated rather than assumed final.
      */
     private void retryBeginIfDue() {
-        if(beginRetryAt<0 || target!=null) {beginRetryAt=-1;return;}
-        if(beginAttempts>=RouteRequestRules.BEGIN_MAX_ATTEMPTS) {
-            beginRetryAt=-1;
+        if(beginRetry.retryAt()<0) return;
+        if(target!=null) {beginRetry.answered();return;}
+        if(beginRetry.exhausted()) {
+            beginRetry.answered();
             if(Boolean.getBoolean("aecraftroute.qa"))
-                LOGGER.info("Route QA give up authoritative begin target: menu={}, attempts={}",menuId,beginAttempts);
+                LOGGER.info("Route QA give up authoritative begin target: menu={}, attempts={}",menuId,beginRetry.attempts());
             status="未能从合成确认页读取目标，请输入物品名称手动设置";
             return;
         }
-        if(RouteRequestRules.beginRetryDue(ticks,beginRetryAt)) pressBegin();
+        if(beginRetry.due(ticks)) pressBegin();
     }
 
     private void layout() {
@@ -717,7 +716,7 @@ public final class RouteScreen extends Screen {
                     }
                 } catch(Exception invalid) {status="读取服务端合成目标失败："+invalid.getMessage();}
             }
-            if(target!=null) beginRetryAt=-1;
+            if(target!=null) beginRetry.answered();
             return;
         }
         if(request.action.equals("restore")) {
