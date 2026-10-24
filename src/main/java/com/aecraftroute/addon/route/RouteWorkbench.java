@@ -6,6 +6,7 @@ import appeng.api.networking.IGrid;
 import appeng.api.stacks.AEItemKey;
 import appeng.core.definitions.AEItems;
 import appeng.helpers.patternprovider.PatternContainer;
+import appeng.helpers.patternprovider.PatternProviderLogicHost;
 import appeng.menu.AEBaseMenu;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerPlayer;
@@ -25,11 +26,13 @@ public final class RouteWorkbench {
     private static final class Session {
         final IGrid grid; final int menu;
         final IdentityHashMap<PatternContainer,String> ids=new IdentityHashMap<>();
+        String query="";
         Session(IGrid grid,int menu) {this.grid=grid;this.menu=menu;}
     }
-    public record ViewRequest(int providerPage,int slotPage,int columns,int rows) {
-        public ViewRequest(int providerPage,int slotPage,int columns) {this(providerPage,slotPage,columns,1);}
-        public ViewRequest { if(rows==0)rows=1;if(rows<1 || rows>12)throw new IllegalArgumentException("供应器行数无效");if(providerPage<0 || slotPage<0 || columns<1 || columns>18)throw new IllegalArgumentException("供应器分页参数无效"); }
+    public record ViewRequest(int providerPage,int slotPage,int columns,int rows,String query) {
+        public ViewRequest(int providerPage,int slotPage,int columns) {this(providerPage,slotPage,columns,1,"");}
+        public ViewRequest(int providerPage,int slotPage,int columns,int rows) {this(providerPage,slotPage,columns,rows,"");}
+        public ViewRequest { query=RouteProviderFilter.boundedQuery(query);if(rows==0)rows=1;if(rows<1 || rows>12)throw new IllegalArgumentException("供应器行数无效");if(providerPage<0 || slotPage<0 || columns<1 || columns>18)throw new IllegalArgumentException("供应器分页参数无效"); }
         public static ViewRequest first() {return new ViewRequest(0,0,8);}
     }
     public record Upload(int cacheSlot,String token,String provider,int slot,ViewRequest view) {
@@ -43,7 +46,12 @@ public final class RouteWorkbench {
     public record ProviderSlot(int slot,RouteView.Stack icon,String output,RouteView.Stack product) {}
     public record Provider(String id,String name,RouteView.Stack icon,int totalSlots,int slotStart,List<ProviderSlot> slots,int occupiedSlots) {}
     public record State(boolean workbench,String message,long revision,List<CacheSlot> cache,List<Provider> providers,
-                        int providerPage,int providerPages,int providerCount,int slotPage,int slotPages) {}
+                        int providerPage,int providerPages,int providerCount,int slotPage,int slotPages,String query) {
+        public State(boolean workbench,String message,long revision,List<CacheSlot> cache,List<Provider> providers,
+                     int providerPage,int providerPages,int providerCount,int slotPage,int slotPages) {
+            this(workbench,message,revision,cache,providers,providerPage,providerPages,providerCount,slotPage,slotPages,"");
+        }
+    }
     private RouteWorkbench() {}
 
     private static Session session(ServerPlayer player,AEBaseMenu menu,IGrid grid) {
@@ -137,16 +145,32 @@ public final class RouteWorkbench {
             return RouteView.Stack.of(output.what(),output.amount(),player.registryAccess());
         }catch(RuntimeException e) {return null;}
     }
+    private static RouteProviderFilter.Metadata metadata(PatternContainer provider) {
+        var group=provider.getTerminalGroup();var icon=group.icon();String location="";
+        String name=group.name().getString(),modId=icon==null?"":icon.getModId(),itemId=icon==null?"":icon.getId().toString();
+        if(provider instanceof PatternProviderLogicHost host) {
+            var pos=host.getBlockEntity().getBlockPos();
+            location=pos.getX()+","+pos.getY()+","+pos.getZ()+" / "+pos.getX()+" "+pos.getY()+" "+pos.getZ();
+            // A group can depict the adjacent machine; retain the actual provider's identity too.
+            var providerIcon=host.getTerminalIcon();
+            if(providerIcon!=null) {
+                name+=" "+providerIcon.getDisplayName().getString();modId+=" "+providerIcon.getModId();itemId+=" "+providerIcon.getId();
+            }
+        }
+        return new RouteProviderFilter.Metadata(name,modId,itemId,location);
+    }
     public static State view(ServerPlayer player,AEBaseMenu menu,IGrid grid,ViewRequest request,String message) {
         if(request==null)request=ViewRequest.first();
         var session=session(player,menu,grid);var providers=activeProviders(grid);
         session.ids.keySet().removeIf(p->!providers.contains(p));
         for(var provider:providers)session.ids.computeIfAbsent(provider,p->UUID.randomUUID().toString());
-        int pages=Math.max(1,(providers.size()+PROVIDERS_PER_PAGE-1)/PROVIDERS_PER_PAGE);
-        int page=Math.min(request.providerPage(),pages-1),start=page*PROVIDERS_PER_PAGE;
-        var shown=providers.subList(start,Math.min(start+PROVIDERS_PER_PAGE,providers.size()));
-        int slotPages=shown.isEmpty()?1:RouteProviderWindow.of(shown.get(0).getTerminalPatternInventory().size(),request.columns(),request.rows(),request.slotPage()).pages();
-        int slotPage=Math.min(request.slotPage(),slotPages-1);
+        String normalizedQuery=RouteProviderFilter.normalize(request.query());
+        boolean queryChanged=!session.query.equals(normalizedQuery);session.query=normalizedQuery;
+        var filtered=RouteProviderFilter.select(providers,RouteWorkbench::metadata,request.query(),queryChanged?0:request.providerPage(),PROVIDERS_PER_PAGE);
+        int pages=filtered.pages(),page=filtered.page();var shown=filtered.items();
+        int requestedSlotPage=queryChanged?0:request.slotPage();
+        int slotPages=shown.isEmpty()?0:RouteProviderWindow.of(shown.get(0).getTerminalPatternInventory().size(),request.columns(),request.rows(),requestedSlotPage).pages();
+        int slotPage=slotPages==0?0:Math.min(requestedSlotPage,slotPages-1);
         var rows=new ArrayList<Provider>();
         for(var provider:shown) {
             var inv=provider.getTerminalPatternInventory();var group=provider.getTerminalGroup();
@@ -165,7 +189,7 @@ public final class RouteWorkbench {
             var entry=cache.getCompound(Integer.toString(i));var item=stack(player,entry);
             cached.add(new CacheSlot(i,entry.getString("token"),icon(player,item),output(player,item),product(player,item)));
         }
-        return new State(true,message,cache.getLong("revision"),List.copyOf(cached),List.copyOf(rows),page,pages,providers.size(),slotPage,slotPages);
+        return new State(true,message,cache.getLong("revision"),List.copyOf(cached),List.copyOf(rows),page,pages,filtered.total(),slotPage,slotPages,request.query());
     }
     @SubscribeEvent public static void clone(PlayerEvent.Clone event) {
         // A GUI-owned buffer must not disappear when a player dies or changes player entity.

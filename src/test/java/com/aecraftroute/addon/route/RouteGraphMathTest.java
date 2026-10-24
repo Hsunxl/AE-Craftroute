@@ -107,4 +107,43 @@ class RouteGraphMathTest {
         assertEquals("10.0k", RouteGraphMath.format(10_000));
         assertEquals("1.50M", RouteGraphMath.format(1_500_000));
     }
+
+    @Test
+    void demandOverrideIsClampedAndParsedAsWholeNumbers() {
+        assertEquals(1, RouteGraphMath.clampDemand(0));
+        assertEquals(1, RouteGraphMath.clampDemand(-5));
+        assertEquals(RouteGraphMath.MAX_DEMAND, RouteGraphMath.clampDemand(Long.MAX_VALUE));
+        assertNull(RouteGraphMath.parseDemand(""));
+        assertNull(RouteGraphMath.parseDemand("12a"));
+        assertNull(RouteGraphMath.parseDemand("-3"));
+        assertNull(RouteGraphMath.parseDemand("99999999999999999999"));
+        assertEquals(Long.valueOf(1), RouteGraphMath.parseDemand("0"));
+        assertEquals(Long.valueOf(12), RouteGraphMath.parseDemand("12"));
+        assertEquals(Long.valueOf(RouteGraphMath.MAX_DEMAND), RouteGraphMath.parseDemand("999999999999999"));
+    }
+
+    @Test
+    void stepMovesByOneRecipeBatchOrOneUnit() {
+        assertEquals(74, RouteGraphMath.stepDemand(10, 64, 1, false));
+        assertEquals(11, RouteGraphMath.stepDemand(10, 64, 1, true));
+        assertEquals(1, RouteGraphMath.stepDemand(10, 64, -1, false));
+        assertEquals(9, RouteGraphMath.stepDemand(10, 64, -1, true));
+        assertEquals(6, RouteGraphMath.stepDemand(5, 0, 1, false));
+        assertEquals(RouteGraphMath.MAX_DEMAND,
+                RouteGraphMath.stepDemand(RouteGraphMath.MAX_DEMAND, Long.MAX_VALUE, 1, false));
+    }
+
+    @Test
+    void overrideReplacesDerivedDemandOnlyWhenPresent() {
+        assertEquals(40, RouteGraphMath.applyOverride(40, null));
+        assertEquals(7, RouteGraphMath.applyOverride(40, 7L));
+        assertEquals(RouteGraphMath.MAX_DEMAND, RouteGraphMath.applyOverride(40, Long.MAX_VALUE));
+    }
+
+    @Test
+    void downstreamFollowsOverriddenDemandAsWholeRuns() {
+        // override 130 with output 64 -> 3 runs -> 3 * perRun(3) = 9 input
+        assertEquals(3, RouteGraphMath.runs(130, 64));
+        assertEquals(9, RouteGraphMath.inputNeed(3, RouteGraphMath.runs(130, 64)));
+    }
 }

@@ -3,6 +3,7 @@ package com.aecraftroute.addon.route;
 import appeng.api.networking.IGrid;
 import appeng.api.stacks.AEKey;
 import com.aecraftroute.addon.planner.*;
+import com.aecraftroute.addon.CraftRouteAddon;
 import net.minecraft.core.HolderLookup;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -20,6 +21,9 @@ import static com.aecraftroute.addon.planner.ProductionPlanningException.Reason.
 @EventBusSubscriber(modid="aecraftroute")
 public final class RoutePlanningService {
     private static final long SLICE_NANOS=2_000_000L, TICK_NANOS=6_000_000L;
+    private static final long SLOW_REQUEST_NANOS=500_000_000L;
+    private enum Phase { CAPTURE("capture"), WORKER_QUEUE("worker queue"), WORKER_COMPUTE("worker computation"), VALIDATION("validation"), COMPLETE("complete");
+        final String label; Phase(String label){this.label=label;} }
     private static final ThreadPoolExecutor WORKERS=new ThreadPoolExecutor(2,2,30,TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(8),r->{var t=new Thread(r,"aecraftroute-route-plan");t.setDaemon(true);return t;},new ThreadPoolExecutor.AbortPolicy());
     private static final List<Job> JOBS=new ArrayList<>();
@@ -45,6 +49,10 @@ public final class RoutePlanningService {
     static final class Job {
         final CaptureWork capture; final ExecutorService executor; final RoutePolicy<AEKey> policy; final AEKey key;
         final long amount,deadline; final int states; final BooleanSupplier valid;
+        final long createdAt=System.nanoTime();
+        volatile Phase phase=Phase.CAPTURE,errorPhase;
+        volatile long captureNanos,workerSubmittedAt,workerStartedAt,workerFinishedAt,validationNanos;
+        private boolean diagnosticLogged;
         final CompletableFuture<CertifiedCraftingPlan> result=new CompletableFuture<>();
         volatile Future<?> worker; volatile CertifiedCraftingPlan plan; volatile Throwable error; volatile boolean finished;
         Job(IGrid grid,RoutePolicy<AEKey> policy,HolderLookup.Provider registries,AEKey key,long amount,ProductionPlanner.Limits limits,BooleanSupplier valid) {
@@ -66,25 +74,65 @@ public final class RoutePlanningService {
                 if(!valid.getAsBoolean()) {result.cancel(true);return;}
                 RouteCanvasPlanner.check(deadline);
                 if(worker==null) {
-                    while(!capture().advance()) {if(System.nanoTime()>=sliceEnd)return;}
-                    var frozen=capture().result();
+                    phase=Phase.CAPTURE;
+                    while(true) {
+                        long captureStart=System.nanoTime();boolean done;
+                        try {done=capture().advance();} finally {captureNanos+=System.nanoTime()-captureStart;}
+                        if(done)break;
+                        if(System.nanoTime()>=sliceEnd)return;
+                    }
+                    long captureStart=System.nanoTime();RouteSnapshot.Result frozen;
+                    try {frozen=capture().result();} finally {captureNanos+=System.nanoTime()-captureStart;}
+                    workerSubmittedAt=System.nanoTime();phase=Phase.WORKER_QUEUE;
                     try {
                         worker=executor.submit(()->{
-                            try { plan=planFrozen(frozen,policy,key,amount,new ProductionPlanner.Limits(states,RouteCanvasPlanner.remaining(deadline))); }
-                            catch(Throwable failure) {error=failure;} finally {finished=true;}
+                            workerStartedAt=System.nanoTime();
+                            try {
+                                long remaining=RouteCanvasPlanner.remaining(deadline);
+                                phase=Phase.WORKER_COMPUTE;
+                                plan=planFrozen(frozen,policy,key,amount,new ProductionPlanner.Limits(states,remaining));
+                            } catch(Throwable failure) {error=failure;errorPhase=phase;} finally {workerFinishedAt=System.nanoTime();finished=true;}
                         });
                     } catch(RejectedExecutionException full) {throw new ProductionPlanningException(LIMIT,"规划工作队列已满；不是缺料");}
                     if(result.isCancelled())worker.cancel(true);
                 } else if(finished) {
-                    if(error!=null) {result.completeExceptionally(error);return;}
+                    if(error!=null) {completeFailure(error,errorPhase==null?Phase.WORKER_COMPUTE:errorPhase);return;}
                     // One atomic server-thread validation/commit boundary. Do not incrementally
                     // validate across ticks then claim the early keys are still current.
                     long validationEnd=Math.min(deadline,System.nanoTime()+SLICE_NANOS);
-                    capture().validate(deadline,validationEnd);
+                    phase=Phase.VALIDATION;long validationStart=System.nanoTime();
+                    try {capture().validate(deadline,validationEnd);} finally {validationNanos+=System.nanoTime()-validationStart;}
                     if(!valid.getAsBoolean()) {result.cancel(true);return;}
-                    RouteCanvasPlanner.check(deadline);result.complete(plan);
+                    RouteCanvasPlanner.check(deadline);phase=Phase.COMPLETE;result.complete(plan);
                 }
-            } catch(Throwable failure) {if(worker!=null)worker.cancel(true);result.completeExceptionally(failure);}
+            } catch(Throwable failure) {
+                if(worker!=null)worker.cancel(true);
+                completeFailure(failure,phase);
+            } finally {logDiagnosticIfNeeded();}
+        }
+        private void completeFailure(Throwable failure,Phase failedPhase) {
+            phase=failedPhase;
+            if(failure instanceof ProductionPlanningException planning && planning.reason()==LIMIT) {
+                var contextual=new ProductionPlanningException(planning.reason(),planning.getMessage()+" [阶段="+failedPhase.label+"]");
+                contextual.initCause(planning);failure=contextual;
+            }
+            result.completeExceptionally(failure);
+        }
+        private void logDiagnosticIfNeeded() {
+            if(diagnosticLogged || !result.isDone() || result.isCancelled() || (!result.isCompletedExceptionally() && System.nanoTime()-createdAt<SLOW_REQUEST_NANOS))return;
+            diagnosticLogged=true;
+            long now=System.nanoTime(),submitted=workerSubmittedAt,started=workerStartedAt,finishedAt=workerFinishedAt;
+            double captureActiveMs=captureNanos/1_000_000.0;
+            double captureWallMs=((submitted==0?now:submitted)-createdAt)/1_000_000.0;
+            double queueMs=submitted==0?0:(started==0?now:started)-submitted;
+            double computeMs=started==0?0:(finishedAt==0?now:finishedAt)-started;
+            double validationMs=validationNanos/1_000_000.0,totalMs=(now-createdAt)/1_000_000.0;
+            String outcome=result.isCompletedExceptionally()?"failed":"slow";
+            Throwable cause=error;
+            if(cause==null && result.isCompletedExceptionally())try {result.join();}catch(CompletionException ex){cause=ex.getCause();}
+            CraftRouteAddon.LOGGER.warn("[AE-Craftroute] route planning {}: target={} amount={} phase={} captureActiveMs={} captureWallMs={} workerQueueMs={} workerComputeMs={} validationMs={} totalMs={} cause={}",
+                    outcome,key,amount,phase.label,captureActiveMs,captureWallMs,queueMs/1_000_000.0,computeMs/1_000_000.0,validationMs,totalMs,
+                    cause==null?"none":cause.getClass().getSimpleName()+": "+cause.getMessage());
         }
     }
     public static CompletableFuture<CertifiedCraftingPlan> planAsync(IGrid grid,RoutePolicy<AEKey> policy,

@@ -78,6 +78,37 @@ public final class RouteGraphMath {
         return 1 + (demand - 1) / output;
     }
 
+    /** Upper bound for a user-set or stepped demand; keeps inputNeed far from overflow. */
+    public static final long MAX_DEMAND = 1_000_000_000_000L;
+
+    /** Clamp a demand to the canvas range [1, MAX_DEMAND]. */
+    public static long clampDemand(long value) {
+        return Math.max(1L, Math.min(MAX_DEMAND, value));
+    }
+
+    /**
+     * One wheel/keyboard step. Moves by one whole pattern batch ({@code output} units) or by
+     * one unit when {@code fine} is set or the batch output is unknown (output &lt;= 0).
+     * Direction &gt; 0 increases; any other value decreases. Result is clamped.
+     */
+    public static long stepDemand(long current, long output, int direction, boolean fine) {
+        long step = (fine || output <= 0) ? 1L : output;
+        long base = clampDemand(current);
+        long next = direction > 0 ? safeAdd(base, step) : base - step;
+        return clampDemand(next);
+    }
+
+    /** A local user override replaces the derived demand; without one the derived value stands. */
+    public static long applyOverride(long derived, Long override) {
+        return override == null ? derived : clampDemand(override);
+    }
+
+    /** Parse a typed quantity: digits only, at most 15 of them. Returns null when invalid or empty. */
+    public static Long parseDemand(String text) {
+        if (text == null || !text.matches("[0-9]{1,15}")) return null;
+        return clampDemand(Long.parseLong(text));
+    }
+
     /** Input amount for a number of executions. */
     public static long inputNeed(long perRun, long runs) {
         if (perRun <= 0) return 0;

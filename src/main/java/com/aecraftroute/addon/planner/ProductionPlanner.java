@@ -1,5 +1,8 @@
 package com.aecraftroute.addon.planner;
 
+import com.aecraftroute.addon.vm.NumericCraftingVM;
+import com.aecraftroute.addon.vm.NumericProgramCompiler;
+
 import java.math.BigInteger;
 import java.util.*;
 import java.util.concurrent.CancellationException;
@@ -10,7 +13,8 @@ import java.util.concurrent.CancellationException;
  * recipe topology or SCC size is special-cased.
  */
 public final class ProductionPlanner<K, R> {
-    private static final BigInteger ZERO = BigInteger.ZERO, ONE = BigInteger.ONE;
+    private static final BigInteger ZERO = BigInteger.ZERO, ONE = BigInteger.ONE,
+            MAX_COUNT = BigInteger.valueOf(Long.MAX_VALUE);
     public enum Status { FEASIBLE, UNREACHABLE, LIMIT }
     public record Recipe<K,R>(R id, Map<K,Long> inputs, Map<K,Long> outputs) {
         public Recipe {
@@ -39,7 +43,7 @@ public final class ProductionPlanner<K, R> {
     private final List<K> keys;
     private final List<Recipe<K,R>> recipes;
     private final Map<R,Integer> recipeIds = new HashMap<>();
-    private final BigInteger[][] inputs, outputs;
+    private final BigInteger[][] inputs, outputs, deltas;
     private final BigInteger[] stock;
     private final boolean[] produced;
     private final Limits limits;
@@ -62,6 +66,7 @@ public final class ProductionPlanner<K, R> {
         for (var r : recipes) { all.addAll(r.inputs.keySet()); all.addAll(r.outputs.keySet()); }
         keys = List.copyOf(all); stock = vector(); produced = new boolean[keys.size()];
         inputs = new BigInteger[recipes.size()][]; outputs = new BigInteger[recipes.size()][];
+        deltas = new BigInteger[recipes.size()][];
         for (int i=0;i<keys.size();i++) {
             long n=available.getOrDefault(keys.get(i),0L);
             if (n<0) throw new IllegalArgumentException("Negative stock");
@@ -70,7 +75,11 @@ public final class ProductionPlanner<K, R> {
         for (int r=0;r<recipes.size();r++) {
             if (recipeIds.put(recipes.get(r).id,r)!=null) throw new IllegalArgumentException("Duplicate recipe id");
             inputs[r]=vector(recipes.get(r).inputs); outputs[r]=vector(recipes.get(r).outputs);
-            for(int k=0;k<keys.size();k++) produced[k] |= outputs[r][k].signum()>0;
+            deltas[r]=vector();
+            for(int k=0;k<keys.size();k++) {
+                produced[k] |= outputs[r][k].signum()>0;
+                deltas[r][k]=outputs[r][k].subtract(inputs[r][k]);
+            }
         }
     }
     private BigInteger[] vector() { var v=new BigInteger[keys.size()]; Arrays.fill(v,ZERO); return v; }
@@ -99,15 +108,160 @@ public final class ProductionPlanner<K, R> {
         return result;
     }
     private BigInteger[] delta(int r) {
-        var d=vector(); for(int k=0;k<keys.size();k++) d[k]=outputs[r][k].subtract(inputs[r][k]); return d;
+        return deltas[r];
     }
     private long jump(BigInteger[] goal, BigInteger[] d) {
         BigInteger count=ONE;
         for(int k=0;k<keys.size();k++) if(d[k].signum()>0 && goal[k].compareTo(stock[k])>0) {
             var n=goal[k].subtract(stock[k]); count=count.max(n.add(d[k]).subtract(ONE).divide(d[k]));
         }
-        if(count.compareTo(BigInteger.valueOf(Long.MAX_VALUE))>0) { clipped=true; return 1; }
+        if(count.compareTo(MAX_COUNT)>0) { clipped=true; return 1; }
         return count.longValueExact();
+    }
+    private final class Probe {
+        int explored;
+        Result<K,R> feasible;
+    }
+    private boolean probeExpired(long allowance) {
+        // Both clocks start at solve(), so preprocessing and the probe never reset
+        // the caller's budget. Cancellation must also propagate from heuristic work.
+        return expired() || System.nanoTime()-started>=allowance;
+    }
+    /** A bounded constructive hint, not a reachability decision or a pruning rule. */
+    private Probe probe(int target, BigInteger[] goal, long increment) {
+        var result=new Probe();
+        if(limits.states<64) return result;
+        long allowance=Math.min(50_000_000L,limits.nanos/16);
+        // Leave longer witnesses to backward search, which can prove repeated
+        // words as macros instead of retaining a large heuristic straight line.
+        int batches=Math.min(64,limits.states/8);
+        var distances=new int[keys.size()]; Arrays.fill(distances,Integer.MAX_VALUE);
+        var recipeDistances=new int[recipes.size()]; Arrays.fill(recipeDistances,Integer.MAX_VALUE);
+        var keyOrder=new ArrayList<Integer>();
+        var producers=new ArrayList<List<Integer>>();
+        var keyIndices=new HashMap<K,Integer>();
+        for(int k=0;k<keys.size();k++) {
+            if(probeExpired(allowance)) return result;
+            producers.add(new ArrayList<>()); keyIndices.put(keys.get(k),k);
+        }
+        var inputIndices=new int[recipes.size()][];
+        var outputIndices=new int[recipes.size()][];
+        var numericInputs=new long[recipes.size()][];
+        var numericOutputs=new long[recipes.size()][];
+        for(int r=0;r<recipes.size();r++) {
+            if(probeExpired(allowance)) return result;
+            inputIndices[r]=new int[recipes.get(r).inputs.size()];
+            numericInputs[r]=new long[inputIndices[r].length];
+            int i=0;
+            for(K key:recipes.get(r).inputs.keySet()) {
+                if(probeExpired(allowance)) return result;
+                inputIndices[r][i]=keyIndices.get(key);
+                numericInputs[r][i++]=recipes.get(r).inputs.get(key);
+            }
+            outputIndices[r]=new int[recipes.get(r).outputs.size()]; i=0;
+            numericOutputs[r]=new long[outputIndices[r].length];
+            for(K key:recipes.get(r).outputs.keySet()) {
+                if(probeExpired(allowance)) return result;
+                int k=keyIndices.get(key); outputIndices[r][i]=k;
+                numericOutputs[r][i++]=recipes.get(r).outputs.get(key);
+                producers.get(k).add(r);
+            }
+        }
+        // Compile once within the SAME probe allowance. Only sparse numeric
+        // snapshot data enters this kernel; no keys, patterns or grid escape.
+        var numericProgram=NumericProgramCompiler.compile(keys.size(),inputIndices,numericInputs,
+                outputIndices,numericOutputs,()->probeExpired(allowance));
+        if(numericProgram==null) return result;
+        var pending=new ArrayDeque<Integer>(); pending.add(target); distances[target]=0;
+        // Discover topology once, independently of current quantities, including
+        // ALL alternative producers. Every relevant input key is visited once.
+        while(!pending.isEmpty()) {
+            if(probeExpired(allowance)) return result;
+            int key=pending.remove();
+            keyOrder.add(key);
+            for(int r:producers.get(key)) {
+                if(probeExpired(allowance)) return result;
+                recipeDistances[r]=Math.min(recipeDistances[r],distances[key]);
+                for(int k:inputIndices[r]) {
+                    if(probeExpired(allowance)) return result;
+                    if(distances[k]==Integer.MAX_VALUE) {
+                        distances[k]=distances[key]+1; pending.add(k);
+                    }
+                }
+            }
+        }
+        var candidates=new ArrayList<Integer>();
+        for(int r=0;r<recipes.size();r++) {
+            if(probeExpired(allowance)) return result;
+            if(recipeDistances[r]!=Integer.MAX_VALUE) candidates.add(r);
+        }
+        candidates.sort(Comparator.comparingInt((Integer r)->recipeDistances[r]).thenComparingInt(r->r));
+        var actual=new long[stock.length]; var word=new ArrayList<Step<R>>();
+        for(int k=0;k<stock.length;k++) {
+            if(probeExpired(allowance)) return result;
+            actual[k]=stock[k].longValueExact();
+        }
+        while(result.explored<batches) {
+            if(probeExpired(allowance)) return result;
+            if(BigInteger.valueOf(actual[target]).compareTo(goal[target])>=0) break;
+            var hints=vector(); hints[target]=goal[target];
+            // Recompute demand from ACTUAL deficits before every batch. Existing
+            // target inventory and partially completed upstream work are not new
+            // demand. Cycles still get only one BFS pass, not a fixed point: hints
+            // may be incomplete and must never become a rejection/proof rule.
+            for(int key:keyOrder) {
+                if(probeExpired(allowance)) return result;
+                var missing=hints[key].subtract(BigInteger.valueOf(actual[key]));
+                if(missing.signum()<=0) continue;
+                for(int r:producers.get(key)) {
+                    if(probeExpired(allowance)) return result;
+                    var rounds=missing.add(outputs[r][key]).subtract(ONE).divide(outputs[r][key]);
+                    for(int k:inputIndices[r]) {
+                        if(probeExpired(allowance)) return result;
+                        hints[k]=hints[k].max(rounds.multiply(inputs[r][k]));
+                    }
+                }
+            }
+            boolean progress=false;
+            // Re-scan near-target producers first after every actual batch. An
+            // executable recipe is useful only for a positive net hint deficit.
+            for(int r:candidates) {
+                if(probeExpired(allowance)) return result;
+                var d=delta(r); BigInteger count=ZERO;
+                for(int k:outputIndices[r]) {
+                    if(probeExpired(allowance)) return result;
+                    if(d[k].signum()>0 && hints[k].compareTo(BigInteger.valueOf(actual[k]))>0) {
+                        var deficit=hints[k].subtract(BigInteger.valueOf(actual[k]));
+                        count=count.max(deficit.add(d[k]).subtract(ONE).divide(d[k]));
+                    }
+                }
+                if(count.signum()==0) continue;
+                count=count.min(MAX_COUNT);
+                // Real pc/opcode execution supplies a concrete step and detached
+                // stock. Failed/timed-out candidates cannot partially commit.
+                var execution=NumericCraftingVM.execute(numericProgram,r,count.longValueExact(),
+                        actual,()->probeExpired(allowance));
+                if(execution.status()==NumericCraftingVM.Status.TIMED_OUT) return result;
+                if(execution.status()!=NumericCraftingVM.Status.EXECUTED) continue;
+                if(probeExpired(allowance)) return result;
+                actual=execution.inventory();
+                var step=execution.step();
+                word.add(new Step<>(recipes.get(step.recipe()).id,step.count()));
+                result.explored++; progress=true; break;
+            }
+            if(!progress) return result;
+        }
+        if(BigInteger.valueOf(actual[target]).compareTo(goal[target])<0 || probeExpired(allowance)) return result;
+        Node witness=new Node(goal,null,null);
+        for(int i=word.size()-1;i>=0;i--) {
+            if(probeExpired(allowance)) return result;
+            witness=new Node(goal,witness,new Block<>(List.of(word.get(i)),1));
+        }
+        // The same independent prefix-capital and forward-replay proof used by
+        // backward search is mandatory. Only its FEASIBLE answer may shortcut it.
+        var certified=certify(witness,target,increment,result.explored);
+        if(!expired() && certified.status==Status.FEASIBLE) result.feasible=certified;
+        return result;
     }
     public Result<K,R> solve(K target, long increment) {
         if(increment<=0) throw new IllegalArgumentException("Increment must be positive");
@@ -115,10 +269,12 @@ public final class ProductionPlanner<K, R> {
         int targetIndex=keys.indexOf(target);
         if(targetIndex<0) return failure(Status.UNREACHABLE,0);
         var goal=vector(); goal[targetIndex]=stock[targetIndex].add(BigInteger.valueOf(increment));
+        var attempt=probe(targetIndex,goal,increment);
+        if(attempt.feasible!=null) return attempt.feasible;
         var queue=new PriorityQueue<Node>(Comparator.comparingDouble((Node n)->n.score).thenComparingLong(n->n.order));
         var basis=new ArrayList<Node>();
         Node root=new Node(goal,null,null); queue.add(root); fair.add(root); basis.add(root);
-        int explored=0;
+        int explored=attempt.explored;
         while(!queue.isEmpty()) {
             if(expired() || explored>=limits.states) return failure(Status.LIMIT,explored);
             // Interleave breadth-first work so a tempting huge batch cannot starve

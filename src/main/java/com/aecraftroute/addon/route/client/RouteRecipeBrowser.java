@@ -22,7 +22,9 @@ public interface RouteRecipeBrowser {
     default boolean release(double x,double y,int button,IngredientDrop drop) {return false;}
     default void renderDrag(GuiGraphics graphics) {}
     default boolean draggingIngredient() {return false;}
+    default boolean pickingRecipe() {return false;}
     default void renderMachine(String recipeId,GuiGraphics graphics,int x,int y,int mx,int my) {}
+    default java.util.List<net.minecraft.network.chat.Component> machineTooltip(String recipeId) {return java.util.List.of();}
     default void showMachine(String recipeId) {}
     default void focusRecipe(String id) {}
     default boolean scroll(double x,double y,double sx,double sy) {return false;}

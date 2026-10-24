@@ -95,15 +95,22 @@ public final class RouteScreen extends Screen {
     private final Map<String, RouteView.Draft> branchDrafts = new LinkedHashMap<>();
     private final Deque<EditState> undo = new ArrayDeque<>();
     private final RouteBranchEdits branchEdits=new RouteBranchEdits();
+    /** Local-only quantity overrides keyed by node path. Never sent to the server, never in RouteBranchEdits. */
+    private final Map<String, Long> quantities = new LinkedHashMap<>();
+    private String quantityPath;
+    private String quantityText = "";
+    private boolean quantityFresh;
     private final List<ActionHit> nodeMenuHits=new ArrayList<>();
     private boolean nodeMenu;
+    private boolean nodeMenuRecipes;
     private int nodeMenuX,nodeMenuY,nodeMenuPage,nodeMenuLeft,nodeMenuTop,nodeMenuWidth,nodeMenuHeight;
     private MNode nodeMenuTarget;
     private long ticks;
-    private void openNodeMenu(MNode node,double mx,double my) {
+    private void openNodeMenu(MNode node,double mx,double my,boolean recipes) {
         selectedNode=node;selectedKey=node.material.key;selectedRecipe=null;jeiTab=true;
         if(browser!=null)browser.select(node.material.renderKey);
-        nodeMenu=true;nodeMenuPage=0;nodeMenuTarget=node;
+        nodeMenu=true;nodeMenuRecipes=recipes;nodeMenuPage=0;nodeMenuTarget=node;
+        nodeMenuHits.clear();
         nodeMenuX=(int)mx;nodeMenuY=(int)my;
     }
     private void removeBranch(boolean wholeNode) { removeBranch(nodeMenuTarget, wholeNode); }
@@ -112,7 +119,7 @@ public final class RouteScreen extends Screen {
         checkpoint();nodeMenu=false;nodeMenuTarget=null;
         if(wholeNode && node==root) {
             target=null;targetAmount=0;targetKeyId=null;source="手动";path="";
-            branchEdits.clear();branches.clear();branchDrafts.clear();draft=null;draftChoice=null;
+            branchEdits.clear();branches.clear();branchDrafts.clear();quantities.clear();draft=null;draftChoice=null;
             materials.clear();offsets.clear();pending.clear();
             selectedNode=null;selectedRecipe=null;selectedKey=null;
             setFieldText("");
@@ -133,22 +140,25 @@ public final class RouteScreen extends Screen {
         } else branchEdits.collapse(node.path);
         branches.keySet().removeIf(p->p.equals(node.path)||p.startsWith(node.path+"/"));
         branchDrafts.keySet().removeIf(p->p.equals(node.path)||p.startsWith(node.path+"/"));
+        quantities.keySet().removeIf(p->p.equals(node.path)||p.startsWith(node.path+"/"));
         rebuildGraph();status=wholeNode && node!=root?"已移除节点及其下级；原配方完整材料不变，可撤销":"已移除下级分支，保留物品节点";
     }
     private void drawNodeMenu(GuiGraphics g,int mx,int my) {
         nodeMenuHits.clear();if(!nodeMenu)return;
         var options=browser==null?List.<RouteRecipeBrowser.Option>of():browser.options();
-        int rows=Math.min(Math.min(5,Math.max(1,(canvasBottom-canvasTop-94)/18)),options.size()),w=Math.min(240,canvasWidth()-8);
-        int h=(rows+4)*18+4;
+        int capacity=nodeMenuCapacity();
+        var page=RoutePopupPage.of(options.size(),capacity,nodeMenuPage);
+        nodeMenuPage=page.page();
+        int rows=nodeMenuRecipes?page.rows():0,w=Math.max(1,Math.min(240,canvasWidth()-8));
+        int h=nodeMenuRecipes?42+rows*18:60;
         int x=Math.max(canvasLeft,Math.min(nodeMenuX,canvasRight-w));
         int y=Math.max(canvasTop,Math.min(nodeMenuY,canvasBottom-h));
         nodeMenuLeft=x;nodeMenuTop=y;nodeMenuWidth=w;nodeMenuHeight=h;
-        nodeMenuPage=Math.max(0,Math.min(nodeMenuPage,Math.max(0,options.size()-rows)));
         g.pose().pushPose();g.pose().translate(0,0,1000);
         g.fill(x,y,x+w,y+h,0xFFCBCCD4);frame(g,x,y,w,h,ACCENT);
-        text(g,"选择配方 · "+(options.isEmpty()?"无配方":(nodeMenuPage+1)+"–"+Math.min(options.size(),nodeMenuPage+rows)+" / "+options.size()),x+4,y+5,w-8,TEXT);
+        text(g,nodeMenuRecipes?"选择配方 · "+page.range(options.size()):"移除分支",x+4,y+5,w-8,TEXT);
         for(int row=0;row<rows;row++) {
-            int i=nodeMenuPage+row;if(i>=options.size())break;
+            int i=page.start()+row;
             var option=options.get(i);int ry=y+20+row*18;
             menuAction(g,x,ry,w,"",()->{
                 browser.selectIndex(option.index());var value=browser.currentDraft();
@@ -159,11 +169,20 @@ public final class RouteScreen extends Screen {
                 nodeMenuHits.add(0,new ActionHit(x+2,ry,x+20,ry+18,"设备",()->browser.showOptionMachine(option.index())));
         }
         int by=y+20+rows*18;
-        menuAction(g,x,by,w/2,"‹ 上一页",()->nodeMenuPage=Math.max(0,nodeMenuPage-Math.max(1,rows)));
-        menuAction(g,x+w/2,by,w-w/2,"下一页 ›",()->nodeMenuPage=Math.min(Math.max(0,options.size()-rows),nodeMenuPage+Math.max(1,rows)));
-        menuAction(g,x,by+18,w,"只清除下级（保留此物品）",()->removeBranch(nodeMenuTarget,false));
-        menuAction(g,x,by+36,w,"移除此节点及下级",()->removeBranch(nodeMenuTarget,true));
+        if(nodeMenuRecipes) {
+            menuAction(g,x,by,w/2,"‹ 上一页",()->moveNodeMenuPage(-1));
+            menuAction(g,x+w/2,by,w-w/2,"下一页 ›",()->moveNodeMenuPage(1));
+        } else {
+            menuAction(g,x,by,w,"只清除下级（保留此物品）",()->removeBranch(nodeMenuTarget,false));
+            menuAction(g,x,by+18,w,"移除此节点及下级",()->removeBranch(nodeMenuTarget,true));
+        }
         g.pose().popPose();
+    }
+    private int nodeMenuCapacity() {return RoutePopupPage.capacity(canvasBottom-canvasTop,42,5);}
+    private void moveNodeMenuPage(int delta) {
+        int count=browser==null?0:browser.options().size();
+        nodeMenuPage=RoutePopupPage.of(count,nodeMenuCapacity(),nodeMenuPage).move(count,delta).page();
+        nodeMenuHits.clear();
     }
     private void menuAction(GuiGraphics g,int x,int y,int w,String label,Runnable run) {
         g.fill(x+1,y,x+w-1,y+17,0xFFADB0C4);text(g,label,x+4,y+5,w-8,TEXT);
@@ -204,7 +223,8 @@ public final class RouteScreen extends Screen {
     }
     private record EditState(AEKey target, long amount, boolean manual,
                              Map<String, RouteView.Choice> branches, Map<String, RouteView.Draft> drafts,
-                             RouteBranchEdits.Snapshot edits, Map<String, int[]> offsets) {}
+                             RouteBranchEdits.Snapshot edits, Map<String, int[]> offsets,
+                             Map<String, Long> quantities) {}
     /** Copy node offsets so undo restores the layout and later drags cannot mutate a snapshot. */
     private Map<String, int[]> copyOffsets() {
         var copy = new HashMap<String, int[]>();
@@ -213,7 +233,8 @@ public final class RouteScreen extends Screen {
     }
     private EditState captureState() {
         return new EditState(target, targetAmount, manualBuild, new LinkedHashMap<>(branches),
-                new LinkedHashMap<>(branchDrafts), branchEdits.snapshot(), copyOffsets());
+                new LinkedHashMap<>(branchDrafts), branchEdits.snapshot(), copyOffsets(),
+                new LinkedHashMap<>(quantities));
     }
     private void pushUndo(EditState state) {
         if (state == null) return;
@@ -227,11 +248,52 @@ public final class RouteScreen extends Screen {
         target=state.target; targetAmount=state.amount; targetKeyId=keyId(target); manualBuild=state.manual;
         branches.clear(); branches.putAll(state.branches); branchDrafts.clear(); branchDrafts.putAll(state.drafts);
         offsets.clear(); state.offsets.forEach((path, offset) -> offsets.put(path, offset.clone()));
+        quantities.clear(); quantities.putAll(state.quantities);
         selectedNode=null; selectedRecipe=null; setFieldText(targetName(target)); rebuildGraph(); status="已退回上一步（仅画布，不回收已生成的样板）";
+    }
+    private void startQuantityEdit(MNode node) {
+        if (node.cycle) { status = "回料引用节点不能覆盖数量"; return; }
+        if(itemId!=null)itemId.setFocused(false);
+        quantityPath = node.path;
+        quantityText = String.valueOf(node.demand);
+        quantityFresh = true;
+        selectedNode = node; selectedKey = node.material.key; selectedRecipe = null;
+        status = "输入数量：数字替换原值，Enter 应用，空内容 Enter 恢复自动，Esc 取消";
+    }
+    private void cancelQuantity() { quantityPath = null; quantityText = ""; quantityFresh = false; }
+    private void commitQuantity() {
+        String path = quantityPath, text = quantityText;
+        boolean fresh = quantityFresh;
+        cancelQuantity();
+        MNode node = path == null ? null : findByPath(path);
+        if (node == null) { status = "节点已变化，数量未修改"; return; }
+        if (node.cycle) { status = "回料引用节点不能覆盖数量"; return; }
+        if (fresh) { status = "数量未修改"; return; }
+        Long value = RouteGraphMath.parseDemand(text);
+        if (node.depth == 0) {
+            if (value == null) { status = "最终产物数量不能留空"; return; }
+            checkpoint(); targetAmount = value; rebuildGraph(); status = "已修改最终产物数量";
+            return;
+        }
+        checkpoint();
+        if (value == null) quantities.remove(path); else quantities.put(path, value);
+        rebuildGraph();
+        status = value == null ? "已恢复自动数量" : "已本地覆盖数量；下游按此重算，上游批数未变，未经服务端校验";
+    }
+    private void adjustQuantity(MNode node, int direction, boolean fine) {
+        if (node.cycle) { status = "回料引用节点不能调整数量"; return; }
+        long output = node.recipe == null ? 0 : RouteGraphMath.outputAmount(node.recipe.choice, node.material.key);
+        long next = RouteGraphMath.stepDemand(node.demand, output, direction, fine);
+        if (next == node.demand) return;
+        checkpoint();
+        if (node.depth == 0) targetAmount = next; else quantities.put(node.path, next);
+        selectedNode = node; selectedKey = node.material.key; selectedRecipe = null;
+        rebuildGraph();
+        status = node.depth == 0 ? "已调整最终产物数量" : "已本地覆盖数量；下游按此重算，上游批数未变，未经服务端校验";
     }
     private void clearManual() {
         checkpoint(); branchEdits.clear();nodeMenu=false;manualBuild=true; branches.clear(); branchDrafts.clear(); draftChoice=null; draft=null;
-        offsets.clear(); selectedNode=null; selectedRecipe=null; rebuildGraph(); status="已清空分支，保留最终产物起点";
+        offsets.clear(); quantities.clear(); selectedNode=null; selectedRecipe=null; rebuildGraph(); status="已清空分支，保留最终产物起点";
     }
     /** Restore the automatic tree layout without touching selected recipes or materials. */
     private void autoArrange() {
@@ -311,6 +373,7 @@ public final class RouteScreen extends Screen {
     private EditState pendingDragState;
     private double dragMouseX, dragMouseY;
     private int dragNodeX, dragNodeY;
+    private boolean nodeDragMoved;
     private boolean panning;
     private double panMouseX, panMouseY;
     private int panStartX, panStartY;
@@ -353,7 +416,7 @@ public final class RouteScreen extends Screen {
     @Override
     protected void init() {
         layout();
-        if(workbench==null)workbench=new RouteWorkbenchPanel((action,argument)->send(action,null,argument));
+        if(workbench==null)workbench=new RouteWorkbenchPanel((action,argument)->send(action,null,argument)!=0);
         workbench.layout(panelLeft+6,panelRight-panelLeft-14,canvasBottom,canvasLeft,canvasWidth(),canvasTop,compact(),uiLayout().collapseCache());
         buildWidgets();
         status = target == null ? "从合成树节点按 F8，或输入物品名称设置目标" : "正在读取可用配方…";
@@ -535,7 +598,7 @@ public final class RouteScreen extends Screen {
         selectedKey = targetKeyId;
         selectedNode = null;
         selectedRecipe = null;
-        branchEdits.clear();nodeMenu=false;branches.clear(); branchDrafts.clear(); manualBuild=true; draftChoice=null; draft=null;
+        branchEdits.clear();nodeMenu=false;branches.clear(); branchDrafts.clear(); quantities.clear(); manualBuild=true; draftChoice=null; draft=null;
         materials.clear();
         offsets.clear();
         pending.clear();
@@ -834,7 +897,8 @@ public final class RouteScreen extends Screen {
         json.addProperty("amount", Math.max(1, targetAmount));
         json.add("nodes", nodes);
         status = "正在证明强制画布：" + nodes.size() + " 个路径分支（每分支至少执行画布批次）"
-                + (skipped > 0 ? "（" + skipped + " 个节点没有可应用样板）" : "");
+                + (skipped > 0 ? "（" + skipped + " 个节点没有可应用样板）" : "")
+                + (quantities.isEmpty()?"":"；本地材料数量覆盖不提交，服务端按最终目标量重算");
         send("apply", target, json.toString());
     }
 
@@ -935,6 +999,8 @@ public final class RouteScreen extends Screen {
             LOGGER.info("Skipping hidden material at {}: {}",path,material.key);
             return null;
         }
+        boolean cyc = ancestors.contains(material.key);
+        if (!cyc) demand = RouteGraphMath.applyOverride(demand, quantities.get(path));
         MNode node = new MNode(path, material, demand, depth);
         materialNodes.add(node);
         var custom=branches.get(path);
@@ -1016,8 +1082,8 @@ public final class RouteScreen extends Screen {
         node.w = node.depth == 0 ? 100 : 86;
         node.h = 62;
         if (node.recipe != null) {
-            node.recipe.w = 82;
-            node.recipe.h = 20;
+            node.recipe.w = 28;
+            node.recipe.h = 24;
             int row = 0;
             for (var child : node.children) {
                 int width = measure(child);
@@ -1244,7 +1310,8 @@ public final class RouteScreen extends Screen {
         int x=node.x,y=node.y;
         boolean selected=selectedNode==node && selectedRecipe==null;
         boolean hover=inside(mx,my,sx,sy,sw,sh);
-        int border=node.cycle?ACCENT:selected?ACCENT:node==root?GOLD:BORDER;
+        boolean overridden=quantities.containsKey(node.path);
+        int border=node.cycle?ACCENT:selected?ACCENT:overridden?AMBER:node==root?GOLD:BORDER;
         g.fill(x,y,x+node.w,y+node.h,selected?0xFFC6C6D4:hover?0xFFD8D9E0:0xFFCBCCD4);
         bevel(g,x,y,node.w,node.h); frame(g,x,y,node.w,node.h,border);
         int slotX=x+(node.w-28)/2,slotY=y+4;
@@ -1253,7 +1320,7 @@ public final class RouteScreen extends Screen {
         icon(g,node.material.renderKey,1,1);
         g.pose().popPose();
         // Quantity is a real corner overlay, not a distant text-column field.
-        String count=RouteGraphMath.format(node.demand);
+        String count=node.path.equals(quantityPath)?quantityText+"|":RouteGraphMath.format(node.demand);
         float countScale=0.75F;
         int countWidth=(int)Math.ceil(font.width(count)*countScale);
         int countX=slotX+28-countWidth, countY=slotY+21;
@@ -1264,6 +1331,7 @@ public final class RouteScreen extends Screen {
         if(!name.equals(node.material.name))name=font.plainSubstrByWidth(node.material.name,node.w-14)+"…";
         text(g,name,x+(node.w-font.width(name))/2,y+37,node.w-6,TEXT);
         String state=node.cycle?"回料引用":node==root?"最终产物":node.recipe==null?"＋ 选择配方":"已展开";
+        if(overridden)state="本地覆盖数量";
         String startup=provenStartup(node.material.name);
         if(startup!=null) state=state+" · 起手 "+startup;
         text(g,state,x+(node.w-font.width(state))/2,y+50,node.w-6,node.cycle?ACCENT:MUTED);
@@ -1273,6 +1341,15 @@ public final class RouteScreen extends Screen {
     }
 
     private long forcedBatches(RNode recipe) {return RouteGraphMath.runs(Math.max(1,recipe.parent.demand),RouteGraphMath.outputAmount(recipe.choice,recipe.parent.material.key));}
+    private String recipeMachineId(RNode recipe) {
+        var value=branchDrafts.get(recipe.parent.path);
+        if(value!=null)return value.recipeId();
+        // Native AE2 pattern identities do not identify a JEI machine. Never guess from inputs or outputs.
+        return recipe.choice.id().startsWith("jei:")?recipe.choice.id().substring(4):null;
+    }
+    private boolean recipeMachineHit(RNode recipe,double mx,double my) {
+        return inside(contentX(mx),contentY(my),recipe.x+5,recipe.y+3,18,18);
+    }
     private void drawRecipe(GuiGraphics g,RNode recipe,int mx,int my) {
         int sx=screenX(recipe),sy=screenY(recipe);
         int sw=Math.round(recipe.w*zoom),sh=Math.round(recipe.h*zoom);
@@ -1282,20 +1359,27 @@ public final class RouteScreen extends Screen {
         g.fill(x,y,x+recipe.w,y+recipe.h,selected?0xFFC6C6D4:0xFFADB0C4);
         bevel(g,x,y,recipe.w,recipe.h);
         frame(g,x,y,recipe.w,recipe.h,selected?ACCENT:BORDER);
-        var value=branchDrafts.get(recipe.parent.path);
-        if(browser!=null && value!=null)browser.renderMachine(value.recipeId(),g,x+2,y+1,(int)contentX(mx),(int)contentY(my));
-        String label=RouteEmcRules.isEmc(value)?"EMC "+RouteEmcRules.cost(RouteEmcRules.unit(value),recipe.parent.demand):
-                recipe.draft?"待编码":"应用 ≥"+forcedBatches(recipe)+" 批";
-        text(g,label,x+23,y+6,recipe.w-25,TEXT);
+        if(browser!=null)browser.renderMachine(recipeMachineId(recipe),g,x+5,y+3,(int)contentX(mx),(int)contentY(my));
+        else text(g,"?",x+11,y+8,8,MUTED);
     }
 
     private void drawNodeTooltip(GuiGraphics g,int mx,int my) {
         if(nodeMenu || browser!=null && browser.draggingIngredient() || workbench!=null && workbench.contains(mx,my))return;
         var recipe=recipeAt(mx,my);
         if(recipe!=null) {
-            g.renderComponentTooltip(font,List.of(Component.literal("路径："+recipe.parent.path),
-                    Component.literal(recipe.draft?"JEI 草稿尚未编码":"应用后此分支至少执行 "+forcedBatches(recipe)+" 批；允许继续循环增产，库存共享"),
-                    Component.literal("左键拖动机器节点；单击或右键选择配方")),mx,my);
+            var lines=new ArrayList<Component>();
+            var value=branchDrafts.get(recipe.parent.path);
+            if(browser!=null) lines.addAll(browser.machineTooltip(recipeMachineId(recipe)));
+            else lines.add(Component.literal("JEI 未启用，设备未知"));
+            lines.add(Component.literal("路径："+recipe.parent.path));
+            if(RouteEmcRules.isEmc(value))lines.add(Component.literal("EMC 消耗："+RouteEmcRules.cost(RouteEmcRules.unit(value),recipe.parent.demand)));
+            else {
+                lines.add(Component.literal("画布需求至少 "+forcedBatches(recipe)+" 批；应用后允许继续循环增产，库存共享"));
+                if(recipe.draft)lines.add(Component.literal("JEI 草稿尚未编码"));
+            }
+            if(!quantities.isEmpty())lines.add(Component.literal("含本地数量覆盖：此批次仅为画布估算，不提交服务端；实际按最终目标量校验"));
+            lines.add(Component.literal("左键拖动；图标单击查询机器；边框单击移除菜单；右键选择配方"));
+            g.renderComponentTooltip(font,lines,mx,my);
             return;
         }
         var node=materialAt(mx,my);
@@ -1303,12 +1387,14 @@ public final class RouteScreen extends Screen {
         var lines=new ArrayList<Component>();
         lines.add(Component.literal(node.material.name));
         lines.add(Component.literal("需求："+node.demand+(node.material.renderKey instanceof AEFluidKey?" mB":" 个")));
+        if(quantities.containsKey(node.path)) lines.add(Component.literal("本地覆盖，未经服务端校验；上游批数未变"));
         if (plan != null) {
             String startup = provenStartup(node.material.name);
             lines.add(Component.literal(plan.proven() ? "权威校验：已证明可行" : "权威校验：" + plan.message()));
             if (startup != null) lines.add(Component.literal("起手只需要：" + startup));
         }
-        lines.add(Component.literal("点击：右侧预览配方；＋ / 右键：直接选配方、创建或删除分支"));
+        lines.add(Component.literal("单击：清下级/删节点菜单；＋ / 右键：选择配方；左键拖动：移动节点"));
+        lines.add(Component.literal("中键：输入数量；滚轮：±1 批（Shift 为 ±1 个）"));
         if(node.recipeError!=null)lines.add(Component.literal(node.recipeError));
         g.renderComponentTooltip(font,lines,mx,my);
     }
@@ -1645,13 +1731,25 @@ public final class RouteScreen extends Screen {
             if(inside(mx,my,nodeMenuLeft,nodeMenuTop,nodeMenuWidth,nodeMenuHeight))return true;
             nodeMenu=false; // Close without swallowing a drag beginning outside this popup.
         }
+        if(workbench!=null && workbench.click(mx,my,button)) {
+            if(itemId!=null)itemId.setFocused(false);
+            cancelQuantity();
+            return true;
+        }
         if (super.mouseClicked(mx, my, button)) {
             if (itemId != null && itemId.isFocused()) onSearchChanged(itemId.getValue());
             return true;
         }
         if(mx>=contentRight())return false;
-        if(workbench!=null && workbench.click(mx,my,button))return true;
+        if (quantityPath != null) cancelQuantity();
+        if (button == 2) {
+            MNode hit = materialAt(mx, my);
+            if (hit != null) startQuantityEdit(hit);
+            return hit != null;
+        }
         if (button != 0 && button != 1) return false;
+        // A short inspector can put the picker over its footer: the visible modal wins hit testing.
+        if(nativeRecipeVisible() && browser.pickingRecipe() && browser.click(mx,my,button,this::expandDraft))return true;
 
         if (suggestionsVisible() && inside(mx,my,suggestionX+suggestionW-40,suggestionY+2,18,14)) {
             suggestionPage = Math.max(0, suggestionPage - 1); return true;
@@ -1699,10 +1797,11 @@ public final class RouteScreen extends Screen {
             selectedNode = material;
             selectedKey = material.material.key;
             selectedRecipe = null;
-            if (button==1 || recipePortHit(material, mx, my) || contentY(my)>=material.y+47) {
-                openNodeMenu(material,mx,my);
+            if (RouteNodeInteraction.press(button,recipePortHit(material,mx,my))==RouteNodeInteraction.Action.RECIPES) {
+                openNodeMenu(material,mx,my,true);
             } else {
                 draggedMaterial = material;
+                nodeDragMoved=false;
                 pendingDragState = captureState();
                 dragMouseX = mx;
                 dragMouseY = my;
@@ -1713,12 +1812,12 @@ public final class RouteScreen extends Screen {
             return true;
         }
         if (recipe != null) {
-            var value=branchDrafts.get(recipe.parent.path);
-            if(button==1) {openNodeMenu(recipe.parent,mx,my);return true;}
+            if(button==1) {openNodeMenu(recipe.parent,mx,my,true);return true;}
             selectedNode = recipe.parent;
             selectedKey = recipe.parent.material.key;
             selectedRecipe = recipe;
             draggedRecipe = recipe;
+            nodeDragMoved=false;
             pendingDragState = captureState();
             dragMouseX = mx;
             dragMouseY = my;
@@ -1778,11 +1877,15 @@ public final class RouteScreen extends Screen {
             return true;
         }
         if (draggedMaterial != null) {
+            nodeDragMoved=RouteNodeInteraction.moved(nodeDragMoved,mx-dragMouseX,my-dragMouseY);
+            if(!nodeDragMoved)return true;
             draggedMaterial.x = dragNodeX + (int) Math.round((mx - dragMouseX) / zoom);
             draggedMaterial.y = dragNodeY + (int) Math.round((my - dragMouseY) / zoom);
             return true;
         }
         if (draggedRecipe != null) {
+            nodeDragMoved=RouteNodeInteraction.moved(nodeDragMoved,mx-dragMouseX,my-dragMouseY);
+            if(!nodeDragMoved)return true;
             draggedRecipe.x = dragNodeX + (int) Math.round((mx - dragMouseX) / zoom);
             draggedRecipe.y = dragNodeY + (int) Math.round((my - dragMouseY) / zoom);
             return true;
@@ -1813,6 +1916,12 @@ public final class RouteScreen extends Screen {
             return true;
         }
         if (draggedMaterial != null) {
+            nodeDragMoved=RouteNodeInteraction.moved(nodeDragMoved,mx-dragMouseX,my-dragMouseY);
+            if(RouteNodeInteraction.release(nodeDragMoved,false)==RouteNodeInteraction.Action.REMOVE) {
+                openNodeMenu(draggedMaterial,mx,my,false);
+                draggedMaterial=null;pendingDragState=null;
+                return true;
+            }
             if (draggedMaterial.x != dragNodeX || draggedMaterial.y != dragNodeY) pushUndo(pendingDragState);
             int ox = draggedMaterial.x - draggedMaterial.autoX;
             int oy = draggedMaterial.y - draggedMaterial.autoY;
@@ -1822,10 +1931,11 @@ public final class RouteScreen extends Screen {
             return true;
         }
         if (draggedRecipe != null) {
-            if(Math.hypot(mx-dragMouseX,my-dragMouseY)<4) {
-                var value=branchDrafts.get(draggedRecipe.parent.path);
-                if(value!=null && browser!=null && contentX(dragMouseX)<draggedRecipe.x+21)browser.showMachine(value.recipeId());
-                else openNodeMenu(draggedRecipe.parent,mx,my);
+            nodeDragMoved=RouteNodeInteraction.moved(nodeDragMoved,mx-dragMouseX,my-dragMouseY);
+            var action=RouteNodeInteraction.release(nodeDragMoved,recipeMachineHit(draggedRecipe,dragMouseX,dragMouseY));
+            if(action!=RouteNodeInteraction.Action.NONE) {
+                if(action==RouteNodeInteraction.Action.MACHINE && browser!=null)browser.showMachine(recipeMachineId(draggedRecipe));
+                else openNodeMenu(draggedRecipe.parent,mx,my,false);
                 draggedRecipe=null;
                 pendingDragState=null;
                 return true;
@@ -1861,17 +1971,28 @@ public final class RouteScreen extends Screen {
                     suggestionPage + (scrollY < 0 ? 1 : -1)));
             return true;
         }
-        if(nodeMenu) {if(scrollY!=0)nodeMenuPage+=scrollY<0?1:-1;return true;}
+        if(nodeMenu) {if(nodeMenuRecipes && scrollY!=0)moveNodeMenuPage(scrollY<0?1:-1);return true;}
         if(workbench!=null && workbench.scroll(mx,my,scrollY))return true;
-        if (scrollY==0)return false;
+        if (scrollY==0 && scrollX==0)return false;
         if (inside(mx, my, panelLeft, canvasTop, panelW, canvasBottom - canvasTop)) {
             if(nativeRecipeVisible()) {
-                if(!browser.scroll(mx,my,scrollX,scrollY))browser.page(scrollY<0?1:-1);return true;
+                if(!browser.scroll(mx,my,scrollX,scrollY) && scrollY!=0)browser.page(scrollY<0?1:-1);return true;
             }
+            if(scrollY==0)return true;
             choiceScroll += scrollY < 0 ? 1 : -1;
             return true;
         }
         if (inside(mx, my, canvasLeft, canvasTop, canvasWidth(), canvasBottom - canvasTop)) {
+            if(!hasControlDown() && (scrollX!=0 || hasShiftDown() && materialAt(mx,my)==null)) {
+                autoCenter=false;
+                panX+=(int)Math.round((scrollX!=0?scrollX:scrollY)*18);
+                return true;
+            }
+            if(scrollY==0)return true;
+            if (!hasControlDown()) {
+                MNode hit = materialAt(mx, my);
+                if (hit != null && !hit.cycle) { adjustQuantity(hit, scrollY > 0 ? 1 : -1, hasShiftDown()); return true; }
+            }
             autoCenter = false;
             if (hasControlDown()) {
                 double cx = contentX(mx), cy = contentY(my);
@@ -1888,11 +2009,36 @@ public final class RouteScreen extends Screen {
     }
 
     @Override
+    public boolean charTyped(char codePoint, int modifiers) {
+        if(workbench!=null && (workbench.charTyped(codePoint,modifiers) || workbench.focused()))return true;
+        if (quantityPath != null && (itemId == null || !itemId.isFocused())) {
+            if (codePoint >= '0' && codePoint <= '9') {
+                if (quantityFresh) { quantityText = ""; quantityFresh = false; }
+                if (quantityText.length() < 15) quantityText += codePoint;
+            }
+            return true;
+        }
+        return super.charTyped(codePoint, modifiers);
+    }
+
+    @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if(workbench!=null && (workbench.keyPressed(keyCode,scanCode,modifiers) || workbench.focused()))return true;
+        if (quantityPath != null && (itemId == null || !itemId.isFocused())) {
+            if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) commitQuantity();
+            else if (keyCode == GLFW.GLFW_KEY_ESCAPE) cancelQuantity();
+            else if (keyCode == GLFW.GLFW_KEY_BACKSPACE) {
+                if (quantityFresh) { quantityText = ""; quantityFresh = false; }
+                else if (!quantityText.isEmpty()) quantityText = quantityText.substring(0, quantityText.length() - 1);
+            }
+            return true;
+        }
         if(itemId==null || !itemId.isFocused()) {
             if(nativeRecipeVisible() && (workbench==null || !workbench.hovered()) && browser.key(keyCode,scanCode))return true;
             if(keyCode==GLFW.GLFW_KEY_ESCAPE && nodeMenu) {nodeMenu=false;return true;}
-            if(keyCode==GLFW.GLFW_KEY_DELETE) {removeBranch(true);return true;}
+            if(keyCode==GLFW.GLFW_KEY_DELETE && selectedNode!=null) {
+                openNodeMenu(selectedNode,screenX(selectedNode),screenY(selectedNode),false);return true;
+            }
             if(keyCode==GLFW.GLFW_KEY_Z && hasControlDown()) {undoEdit();return true;}
             if(keyCode==GLFW.GLFW_KEY_HOME) {autoArrange();return true;}
         }
@@ -1965,6 +2111,7 @@ public final class RouteScreen extends Screen {
             } else if(RouteRequestRules.mutation(request.action))status="服务器未在 10 秒内确认；未自动重试，请检查缓存后再操作";
         }
         if(browser!=null)browser.tick();
+        if(workbench!=null)workbench.tick();
         retryBeginIfDue();
         if(workbench!=null && ++workbenchTicks%40==0)workbench.refresh();
         var mc = Minecraft.getInstance();

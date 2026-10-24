@@ -122,4 +122,73 @@ class RoutePlanningServiceTest {
         assertEquals(ProductionPlanningException.Reason.LIMIT,((ProductionPlanningException)error.getCause()).reason());
         assertNull(job.worker);assertEquals(0,captures.get());assertEquals(0,commits.get());
     }
+    @Test void limitFailureDuringCaptureKeepsReasonAndAddsCapturePhase() {
+        RoutePlanningService.CaptureWork failingCapture=new RoutePlanningService.CaptureWork() {
+            public boolean advance(){throw new ProductionPlanningException(ProductionPlanningException.Reason.LIMIT,"capture budget exhausted");}
+            public RouteSnapshot.Result result(){throw new AssertionError("capture did not complete");}
+            public void validate(long deadline,long validationEnd){throw new AssertionError("must not validate");}
+        };
+        var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,failingCapture);tick(job);
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
+        assertEquals(ProductionPlanningException.Reason.LIMIT,failure.reason());
+        assertTrue(failure.getMessage().startsWith("capture budget exhausted"));assertTrue(failure.getMessage().contains("阶段=capture"));
+    }
+    @Test void limitFailureDuringValidationKeepsReasonAndAddsValidationPhase() throws Exception {
+        RoutePlanningService.CaptureWork failingValidation=new RoutePlanningService.CaptureWork() {
+            public boolean advance(){return true;}
+            public RouteSnapshot.Result result(){return new RouteSnapshot.Result(Map.of(target,List.of(plain)),Map.of(ore,1L));}
+            public void validate(long deadline,long validationEnd){throw new ProductionPlanningException(ProductionPlanningException.Reason.LIMIT,"validation budget exhausted");}
+        };
+        var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,failingValidation);
+        tick(job);finishWorker(job);tick(job);
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
+        assertEquals(ProductionPlanningException.Reason.LIMIT,failure.reason());
+        assertTrue(failure.getMessage().startsWith("validation budget exhausted"));assertTrue(failure.getMessage().contains("阶段=validation"));
+        assertInstanceOf(ProductionPlanningException.class,failure.getCause());
+    }
+    @Test void workerQueueBudgetFailureIsAttributedToQueueAndKeepsOriginalCause() throws Exception {
+        var started=new CountDownLatch(2);var release=new CountDownLatch(1);
+        Runnable blocker=()->{started.countDown();try{release.await();}catch(InterruptedException interrupted){Thread.currentThread().interrupt();}};
+        workers.submit(blocker);workers.submit(blocker);assertTrue(started.await(3,TimeUnit.SECONDS));
+        try {
+            var job=new RoutePlanningService.Job(policy,target,1,new ProductionPlanner.Limits(6000,100_000_000L),()->true,workers,capture(plain,false));
+            tick(job);assertNotNull(job.worker);assertFalse(job.worker.isDone());
+            Thread.sleep(120);
+            release.countDown();
+            job.worker.get(3,TimeUnit.SECONDS);tick(job);
+            var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+            var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
+            assertEquals(ProductionPlanningException.Reason.LIMIT,failure.reason());
+            assertTrue(failure.getMessage().contains("阶段=worker queue"));
+            assertInstanceOf(ProductionPlanningException.class,failure.getCause());
+        } finally {release.countDown();}
+    }
+    @Test void workerComputationLimitFailureIsAttributedAndRetainsOriginalFailure() throws Exception {
+        var original=new ProductionPlanningException(ProductionPlanningException.Reason.LIMIT,"worker budget exhausted");
+        IPatternDetails failingPattern=(IPatternDetails)Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{IPatternDetails.class},(proxy,method,args)->{
+            if(method.getName().equals("hashCode"))return System.identityHashCode(proxy);
+            if(method.getName().equals("equals"))return proxy==args[0];
+            if(method.getName().equals("getInputs"))throw original;
+            return method.invoke(plain,args);
+        });
+        var job=job(failingPattern,()->true,false);tick(job);
+        job.worker.get(3,TimeUnit.SECONDS);tick(job);
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
+        assertEquals(ProductionPlanningException.Reason.LIMIT,failure.reason());
+        assertTrue(failure.getMessage().contains("阶段=worker computation"));assertSame(original,failure.getCause());
+    }
+    @Test void nonLimitFailureIsPropagatedAsTheSameObject() {
+        var original=new IllegalStateException("capture failed");
+        RoutePlanningService.CaptureWork failingCapture=new RoutePlanningService.CaptureWork() {
+            public boolean advance(){throw original;}
+            public RouteSnapshot.Result result(){throw new AssertionError("capture did not complete");}
+            public void validate(long deadline,long validationEnd){throw new AssertionError("must not validate");}
+        };
+        var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,failingCapture);tick(job);
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        assertSame(original,error.getCause());
+    }
 }
