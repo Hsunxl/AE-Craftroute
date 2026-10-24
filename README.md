@@ -1,105 +1,146 @@
-# AE2 VM — AE2 合成计划器
+# AE-Craftroute — AE2 合成计划扩展
 
 ![Minecraft](https://img.shields.io/badge/Minecraft-1.21.1-blue?logo=minecraft)
-![NeoForge](https://img.shields.io/badge/NeoForge-21.1.259+-orange)
+![NeoForge](https://img.shields.io/badge/NeoForge-21.1.169+-orange)
 ![AE2](https://img.shields.io/badge/AE2-19.2.18+-green)
 ![Java](https://img.shields.io/badge/Java-21-red)
 ![License](https://img.shields.io/badge/License-LGPL%20v3-blue)
 
 > **English version**: [README_en.md](README_en.md)
 
-**AE2 VM** 是 [Applied Energistics 2](https://github.com/AppliedEnergistics/Applied-Energistics-2) 的 NeoForge 扩展模组。它把 AE2 原有的**递归合成树遍历**换成**一次性的可证明计划搜索**：在考虑真实库存的前提下反向推导"到底要做什么、按什么顺序做"，并把结果连同**可执行程序**一起交给合成 CPU。
+AE-Craftroute 是 [Applied Energistics 2](https://github.com/AppliedEnergistics/Applied-Energistics-2) 的 NeoForge 扩展。它替换 AE2 的合成可行性计算：合成请求的判定改由一次搜索完成，搜索结果同时给出所需的中间产物与它们的执行顺序，并以可执行程序的形式交给合成 CPU。产物为 `build/libs/` 下的单个 jar 文件。
 
-它解决的是递归算法结构上算不对的三类配方：
-
-- **循环配方**（`A→B`、`B→2A` 这类回料环）——递归展开会无限展开或直接判失败；
-- **增量 / 净产出**（产物又参与自身合成，只有净增量才是真正需求）；
-- **真实可执行顺序**（回料必须在装配室之间按顺序流转，不能当成一次性消耗）。
+该扩展的全部计算由本模组完成，不修改 AE2 的样板定义与库存结构。与 AE2 的交互通过公开接口和 Mixin 注入实现，注入目标列于 [ATTRIBUTIONS.md](ATTRIBUTIONS.md)。
 
 ---
 
-## 它到底改了什么
+## 一、递归展开不适用的三类配方
 
-AE2 判断"能不能合成"的方式是把样板树递归展开一遍。遇到上面三类配方，展开要么爆栈、要么算出一个**实际执行不了的计划**——于是玩家看到两种互相矛盾的现象：明明能合成却显示缺料，或者计划显示可行但 CPU 卡在 0 进度。
+AE2 判断一次合成请求能否完成，依据对样板树的递归展开：从目标开始，逐层把每种材料替换成产出它的样板，直到所有叶子都由库存满足。该判据在多数配方上与执行过程一致，在以下三类配方结构上与执行过程不一致。
 
-AE2 VM 把这一步换成一个**可证明的搜索**：
+**循环配方。** 循环配方由互为输入的样板构成，例如 `A → B` 与 `B → 2A`。这两张样板各自消耗对方的产物，递归展开因此没有自然终止的叶子：展开过程要么持续进行直至栈溢出或触发深度上限，要么在第一个环处判定为不可合成。此类配方在具有任意一种参与物作为起手资本时可以持续运转并产出净增量，其可执行性取决于起手资本与环的净产出，而非展开过程能否终止。
 
-1. **快照**（`RouteSnapshot`）：一次读出这台网络上的样板集合与库存，作为整个计算的唯一依据。画布预览与真正下单用的是同一个快照构造器，所以"看到的"和"执行的"不可能对不上。
-2. **计划**（`NetworkProductionPlanner`）：反向可覆盖性搜索，显式维护"每个材料要多少、库存给多少、还差多少由哪个样板补"，循环与净产出都在库存记账里自然成立。
-3. **证明**（`CertifiedCraftingPlan`）：只有搜索通过前向重放校验（每一步的输入在执行那一刻确实够用）才返回。计划自带 `usedItems`（起手需要什么）和 `program`（按什么顺序执行），`missingItems()` 恒为空——**计划本身就是可执行性的证明**。
-4. **执行**（CPU mixin）：CPU 拿到认证程序后按程序顺序派单，把回料留在 CPU 库存里供下一轮复用，等 `waitingFor` 清空、程序走完才把最终产物交付给请求方。
+**净增量。** 当一张样板的产物同时是该样板或其他样板的输入时，真实需求是净增量。递归展开把每一层级计为一次新的消耗，同一份材料因此在需求统计中被多次计入，得到的需求量高于实际执行所需的量。
 
-**四种结论严格区分**（这是本模组对"伪缺料"的核心修复）：
+**顺序依赖。** 回料在装配器之间的流转具有先后关系：前一步的产物须先进入缓冲，才能作为后一步的输入。递归展开的产物是一份材料清单，其中不含顺序信息。材料清单成立与计划可执行是两项不同的条件，前者成立不蕴含后者成立。
 
-| 结论 | 含义 |
-|------|------|
-| `feasible` | 已证明可合成，附带起手清单与执行程序 |
-| `UNREACHABLE` | 已证明**做不到**（真正的缺料/无生产者） |
-| `LIMIT` | 预算内**尚未判定**——不是缺料 |
-| `UNSUPPORTED` | 无法精确建模——未按缺料处理 |
-
-只有 `UNREACHABLE` 才会说"缺料"。预算耗尽、样板语义无法建模都**不会**被伪装成缺料。
+这三类结构在游戏内产生两类报告：可执行的配方被报告为缺少材料；或计划被报告为可行而 CPU 的进度停留在零。两类报告的共同机制是判定依据与执行过程不一致：递归展开的判据是展开过程能否终止，执行所需的判据是这批产物能否按序产出。
 
 ---
 
-## 合成画布
+## 二、替换后的计算流程
 
-除了替换算法，本模组还提供一个**合成树画布**：把 AE2 算出的路线直接画出来，你可以对每个节点指定用哪个样板、往哪一层展开。
+判定被拆为四个阶段。每个阶段的输出是下一阶段的唯一输入，阶段之间不共享可变状态。
 
-- **权威校验**：画布显示的可行性、起手清单、批次数量全部来自服务端同一个认证计划器，不是客户端估算。目标材料一改就重新请求，看到的结论与下单时一致。
-- **按材料锁定**：你可以逐节点指定"这个材料用这张样板"。锁定按材料生效，画布上的选择会原样进入服务端计算。
-- **整幅原子应用**：一次把所有节点的选择作为一个整体提交，服务端逐个校验后一次性应用。
-- **冲突逐节点诊断**：同一个材料在画布上被指定了两张不同样板时，不会静默挑一个，而是明确告诉你哪个材料冲突、需要先统一；选中的样板若已不在网络里，也会单独指出是哪个材料。
+**1. 快照。** `RouteSnapshot` 读取网络当前的样板定义与库存，形成一份不可变快照。画布预览与真实下单由同一个构造器产生快照，两条路径的输入因此相同。
+
+**2. 搜索。** `NetworkProductionPlanner` 从目标反向推导，为每种材料分别记账三项数值：总需求、库存可覆盖的部分、补足差额的样板。循环与净增量在该记账方式下不需要独立分支：回料的消耗与再生记在同一份账上，净增量由记账方式直接给出。
+
+**3. 重放校验。** 搜索得到候选方案后不立即返回。候选程序按顺序正向重放一遍，逐步检查每一步的输入在其执行时刻是否满足。通过全部重放的方案以 `CertifiedCraftingPlan` 返回。该对象携带起手资本 `usedItems` 与执行顺序 `program`，其 `missingItems()` 恒为空，因为重放通过即表示每一步的输入在其执行时刻都能被满足。
+
+**4. 执行。** CPU 侧的桥接按程序顺序派单，把回料保留在 CPU 库存中供下一轮使用，并在 `waitingFor` 清空且程序走完后交付最终产物。程序与执行游标随 CPU 的 NBT 持久化；服务器停止后重新启动时，在途作业从存档恢复并继续执行。
+
+### 四种结论的判定条件
+
+| 结论 | 判定条件 |
+|------|----------|
+| `feasible` | 搜索找到方案且正向重放全部通过；附起手资本清单与执行程序 |
+| `UNREACHABLE` | 已证明不可行：所需材料在库存与可产出范围内均不足，或没有任何样板产出该材料 |
+| `LIMIT` | 在给定预算内未完成判定，方案既未证明可行也未证明不可行 |
+| `UNSUPPORTED` | 样板语义无法精确建模，方案未参与可行性判定 |
+
+缺料提示仅由 `UNREACHABLE` 产生。`LIMIT` 与 `UNSUPPORTED` 各自返回对应的结论值，其界面文案不表述为缺少材料。
 
 ---
 
-## 验证情况
+## 三、合成画布
 
-本项目对合成计划的正确性采用**独立实例真机验证**，而不是只看单元测试：
+除计算之外，本扩展提供合成树画布，把计算结果展开为可编辑的节点图。
 
-- **离线测试**：189 个测试全通过，覆盖计划器、画布预览/应用、载荷上限、以及用 ae2cs 聚合器链（8 粉 + 8 充能石英 + 32 沙 → 32 种子）做的固定回归。
-- **真实网格**：专用开发服务器里搭真实 ME 网络（控制器、驱动、合成存储、样板供应器、分子装配器、合成 CPU），真实编码样板、真实下单：
-  - 三节点回料环（绿宝石→钻石→2 青金石→绿宝石），只给 1 个绿宝石请求 3 个钻石 → 交付 3 个，库存清零；
-  - 取消场景、CPU 存档往返、**真实停服重启后续跑**（新进程从存档恢复在途作业并完成交付）；
-  - requester 只接受一部分产物时的分次交付；
-  - AdvancedAE 量子计算机上执行同一套程序。
+- **结论来源。** 画布显示的可行性、起手清单与批次数均由服务端计划器给出，客户端不执行独立估算。目标材料变化时重新发起请求，画布结论与提交时使用的结论来自同一来源。
+- **按材料锁定样板。** 可为单个材料指定使用哪一张样板。锁定以材料为单位生效，画布上的选择原样进入服务端计算，不经过客户端换算。
+- **整幅原子应用。** 一次提交携带全部节点的选择，服务端逐项校验后一次性应用。应用过程不存在部分生效的中间状态。
+- **冲突诊断。** 同一材料被指定两张不同样板时，服务端指出冲突的材料并要求先统一，不静默选择其中之一。被选中的样板离开网络时，同样按材料指出。
 
 ---
 
-## 使用方法
+## 四、异步规划与预算
+
+一次规划涉及样板图遍历、输入变体枚举与重放校验，耗时随网络规模增长。在请求线程内一次算完时，耗时峰值直接计入服务端 tick。规划因此实现为由服务端 tick 驱动的状态机。
+
+- **读取与计算分离。** 对网格与库存的读取只在服务端线程进行；工作线程接收不可变快照，不持有网格引用。
+- **预算覆盖全链路。** 队列等待、快照抓取、变体枚举与重放校验共享同一个截止时间。任一阶段耗尽预算即返回 `LIMIT`，未完成的搜索不表述为缺料。
+- **提交前重新校验。** 计算完成后先对当前网络状态执行一次校验再提交。期间样板或库存发生变化时，返回计划已失效并要求重试，不提交基于旧状态的计划。
+- **取消传播。** 取消请求级联到工作线程的在途任务与队列中的作业。菜单关闭、网络切换、玩家登出与服务器停止均使作业失效。
+
+---
+
+## 五、样板语义的建模
+
+样板并非总是"若干输入换若干输出"。以下三类语义按同一原则处理：能够精确建模时纳入计算，否则返回 `UNSUPPORTED`。
+
+**有限耐久工具。** 参与合成的工具在每次使用后损耗一档耐久。损耗后的物品标识、末次损坏是否返还物品、剩余耐久如何随任务持久化，均属于执行协议的一部分。当前实现依据实际消耗的耐久状态校验转移是否成立（`FiniteToolTransitions`）；无法由该协议完整描述的情形返回 `UNSUPPORTED`。把工具数量摊平为可无限摊销的计数，会得到形式上通过而执行阶段失败的计划，因此不采用该近似。
+
+**替代输入的族级聚合。** 当一张样板的某个输入槽接受一组等价材料，且该槽的需求须在这组材料之间分配时，分配按带容量的二分匹配求解（`FuzzyFamilyAllocator`）。候选集合相同的槽合并为一个需求节点，求解后把流量分配回原始的物理槽位。合成出的族标识不被提取、不写入存档、不发送给样板供应器。
+
+**包装样板。** 对外层包装样板（如倍率包装）仅做公开接口层面的兼容（`ScaledPatternCompat`）。一次外层派发对应一次任务，沿用外层的输入输出数量与供应器标识，内层样板不进入可执行计划。
+
+---
+
+## 六、安装与使用
 
 ### 安装
 
-1. 安装 [NeoForge](https://neoforged.net/) 与 [Applied Energistics 2 19.2.18+](https://www.curseforge.com/minecraft/mc-mods/applied-energistics-2)
-2. 将 `ae2vm-nodetect-<版本>.jar` 放入 `mods/` 文件夹（**只能保留一个**，否则 duplicate modId 报错）
-3. 启动游戏，日志出现 `AE2 VM <版本> (built ...)` 横幅即加载成功
+1. 安装 [NeoForge](https://neoforged.net/) 与 [Applied Energistics 2 19.2.18+](https://www.curseforge.com/minecraft/mc-mods/applied-energistics-2)。
+2. 把 `aecraftroute-<版本>_neoforge_1.21.1.jar` 放入 `mods/` 目录。目录内只保留这一个副本；多份副本触发 modId 重复错误。
+3. 启动游戏。日志中出现构建横幅即表示加载成功。
 
-### 在游戏中使用
+模组标识为 `aecraftroute`，包名为 `com.aecraftroute.addon`，两者在 `1.13.19-local.34` 由 `ae2vm` 改来。存档中的在途作业不受影响：读取 NBT 时若新键不存在，回退读取旧键，下次写档时按新键写入并清除旧键。第三方集成方按新的包名与类名更新引用，公开方法名不变。
 
-装好即生效，无需额外设置：
+### 依赖
 
-1. 正常编码 AE2 样板放进样板供应器
-2. 在 ME 终端发起合成请求
-3. 计划与执行全自动
+| 依赖 | 类型 | 版本要求 |
+|------|------|----------|
+| Minecraft | 必需 | 1.21.1 |
+| NeoForge | 必需 | ≥ 21.1.169（开发环境使用 21.1.259） |
+| Applied Energistics 2 | 必需 | ≥ 19（开发环境使用 19.2.18） |
+| AdvancedAE | 可选 | 1.6.12；提供量子计算机执行桥，未安装时该组 mixin 不注入 |
+| AE2 Crafting Tree | 可选（客户端） | 画布集成对象（`@Pseudo` mixin）；未安装时跳过该注入，画布使用内置界面 |
+| JEI | 可选（客户端） | ≥ 19.57.0；提供合成表页面的导入按钮 |
+| Configured | 可选 | 2.x；提供游戏内配置编辑界面，配置本身不依赖它 |
 
-**配置开关**：`config/ae2vm-common.toml` 的 `proxyEnabled=false` 可关闭接管、交回 AE2 原生递归计算（画布上设了约束时会明确报错，而不是悄悄绕过约束）。
+可选依赖按软依赖处理：对应模组缺失时相关入口不加载，主计算与执行路径不受影响。
 
-**第三方样板**：ECO 等模组自己的请求默认透传给原生逻辑；需要接管的第三方模组可显式注册（见下）。
+### 使用
+
+装入后不需要额外设置。
+
+1. 按常规方式编码 AE2 样板并放入样板供应器。
+2. 在 ME 终端发起合成请求。
+3. 计划与执行自动完成。
+
+### 配置
+
+配置文件为 `config/aecraftroute-common.toml`。`proxyEnabled=false` 关闭接管，计算交回 AE2 原生递归逻辑；此时画布上若设有约束，返回明确错误，不绕过约束执行。
+
+从更名前的版本升级时，配置目录中只有 `ae2vm-common.toml` 的情况下，首次启动将其复制为新的配置文件名，并把旧文件改名为 `ae2vm-common.toml.migrated`。
+
+第三方模组发起的请求默认透传给原生逻辑，需要接管的模组须显式注册，见下章。
 
 ---
 
-## 第三方模组集成（开发）
+## 七、第三方集成
 
 ```java
-import com.ae2vm.addon.api.AE2VMCrafting;
-import com.ae2vm.addon.api.AE2VMCraftingRegistry;
+import com.aecraftroute.addon.api.CraftRouteCrafting;
+import com.aecraftroute.addon.api.CraftRouteCraftingRegistry;
 
-// 在 @Mod 构造函数中注册（marker = 类名包含的子串），声明"本模组的请求可以接管"
-AE2VMCraftingRegistry.register("mymod");
+// 在 @Mod 构造函数中注册：声明本模组发起的请求允许被接管（marker 为类名包含的子串）
+CraftRouteCraftingRegistry.register("mymod");
 
-// 可选集成：仅当 AE2 VM 已加载时使用自己的计算，否则回退原生
-if (AE2VMCrafting.isLoaded()) {
-    CompletableFuture<ICraftingPlan> plan = AE2VMCrafting.calculate(
+// 可选集成：已加载时使用本扩展的计算，否则回退原生
+if (CraftRouteCrafting.isLoaded()) {
+    CompletableFuture<ICraftingPlan> plan = CraftRouteCrafting.calculate(
         grid, requester, what, amount, strategy);
     plan.thenAccept(p -> submitToCpu(p, requester));
 } else {
@@ -107,85 +148,74 @@ if (AE2VMCrafting.isLoaded()) {
 }
 ```
 
-- **注册**（`register`）决定要不要接管本模组发起的请求；**计算**（`calculate`）是主动调用本模组的计划器。
-- AE2 自身（`appeng.*`）的请求总是被接管；未注册的第三方模组走自己的逻辑。
-- 依赖声明 `compileOnly`，未安装本模组时 `isLoaded()` 返回 `false`，一切照常。
-- `calculate()` 异步执行；`calculateSync()` 阻塞调用线程，仅非服务器主线程使用。
+- 注册（`register`）决定本模组发起的请求是否被接管；计算（`calculate`）为主动调用本扩展的计划器。两者相互独立。
+- AE2 自身（`appeng.*`）的请求总是被接管；未注册的模组沿用自己的逻辑。
+- 依赖声明为 `compileOnly`。未安装本扩展时 `isLoaded()` 返回 `false`，调用方行为不变。
+- `calculate()` 异步执行；`calculateSync()` 阻塞调用线程，并拒绝在服务端主线程上使用。
 
 ---
 
-## 项目结构
+## 八、项目结构
 
 ```
-src/main/java/com/ae2vm/addon/
-├── AE2VMAddon.java                  # Mod 入口（兼容性检测 / 构建横幅）
-├── BuildInfo.java                   # 构建版本戳读取 + /ae2vm build 命令
-├── api/
-│   ├── AE2VMCrafting.java           # 公开 API（calculate / planNow）
-│   ├── AE2VMCraftingRegistry.java   # 第三方模组注册表
-│   └── DispatchTrace.java           # 认证程序挂载归属（AE2 / AdvancedAE）
+src/main/java/com/aecraftroute/addon/
+├── CraftRouteAddon.java                # 模组入口（构建横幅、配置迁移）
+├── BuildInfo.java                      # 构建戳读取与 /aecraftroute build 命令
+├── api/                                # 公开接口与第三方注册
+├── compat/                             # 包装样板兼容、外部模组适配（advancedae、thunderbolt 空壳）
+├── compiler/                           # 有限耐久输入接口
+├── config/                             # 配置定义
 ├── planner/
-│   ├── ProductionPlanner.java       # 反向可覆盖性搜索 + 前向重放校验
-│   ├── NetworkProductionPlanner.java# 网络样板图 → 计划
-│   ├── CertifiedCraftingPlan.java   # 计划 + 执行程序
-│   ├── PatternVariant.java          # 样板槽位组合枚举
-│   ├── ProductionJob.java           # CPU 内的程序执行状态（可持久化）
-│   └── ProductionPlanningException.java # 四类结论
-├── route/
-│   ├── RouteSnapshot.java           # 唯一快照来源（样板 + 库存）
-│   ├── RoutePlanView.java           # 画布的权威计划视图
-│   ├── RouteIntent.java             # 按材料锁定 + 冲突诊断
-│   ├── RouteApply.java              # 整幅原子应用
-│   ├── RouteNetwork.java            # 画布网络协议
-│   └── client/                      # 画布界面
-├── vm/
-│   ├── TwoNodeGrowthPlanner.java    # 两节点回料环识别 + 派发顺序
-│   ├── NetProduction.java           # 净产出判定
-│   └── FeedbackReservation.java     # 回料预留
-├── mixin/
-│   ├── CraftingServiceMixin.java    # 接管 beginCraftingCalculation
-│   ├── ProductionCpuMixin.java      # AE2 合成 CPU 的执行桥
-│   ├── AdvancedProductionCpuMixin.java # AdvancedAE 量子 CPU 的执行桥
-│   └── GrowthCpuMixin.java / AdvancedGrowthCpuMixin.java # 非认证计划的兜底
-└── selftest/                        # 独立实例自检（不打进发布 jar）
+│   ├── ProductionPlanner.java          # 反向记账搜索与正向重放校验
+│   ├── NetworkProductionPlanner.java   # 网络样板图 → 计划
+│   ├── CertifiedCraftingPlan.java      # 计划与执行程序
+│   ├── ProductionPlanCache.java        # 按值比较的有界计划缓存
+│   ├── PatternVariant(s).java          # 样板输入槽位的精确组合
+│   ├── FiniteToolTransitions.java      # 有限耐久工具的转移校验
+│   ├── FuzzyFamilyAllocator.java       # 材料族的带容量匹配
+│   └── ProductionJob.java              # CPU 内执行状态（可持久化）
+├── route/                              # 画布、规划服务与网络规则
+│   ├── RouteSnapshot.java              # 唯一快照来源（样板与库存）
+│   ├── RoutePlanningService.java       # 服务端 tick 驱动的异步规划
+│   ├── RouteCanvasPlanner.java         # 画布有限路径 → 认证计划
+│   ├── ForcedRoutePlanner.java         # 有限路径执行契约
+│   ├── RouteApply.java                 # 整幅原子应用
+│   └── client/                         # 画布界面
+├── telemetry/                          # 结果记录与日志节流
+├── mixin/                              # 合成服务与 CPU 执行桥
+├── vm/                                 # 回料环识别与净产出判定
+└── selftest/                           # 独立实例自检（不进入发布 jar）
+
+src/main/resources/
+├── META-INF/neoforge.mods.toml
+├── aecraftroute.mixins.json
+├── aecraftroute.png
+└── assets/ae2/screens/aecraftroute_route.json
 ```
 
 ---
 
-## 模组信息
-
-| 项目 | 值 |
-|------|-----|
-| Mod ID | `ae2vm` |
-| 名称 | AE2 VM |
-| 包名 | `com.ae2vm.addon` |
-
-### 依赖
-
-| 依赖 | 版本 |
-|------|------|
-| Minecraft | 1.21.1 |
-| NeoForge | ≥ 21.1.169（实际测试 21.1.259） |
-| Applied Energistics 2 | ≥ 19.2.17（实际测试 19.2.18） |
-| AdvancedAE（可选） | 1.6.12 |
-| Configured（可选，游戏内配置界面） | 2.x |
-
----
-
-## 构建
+## 九、构建与测试
 
 ```bash
-# 单次构建（产物在 build/libs/）
-gradlew -p . jar --offline -PblockedMode=warn
-
-# 构建 + 递增版本号 + 复制进 mods
-buildBoth.bat
+# 单次构建，产物位于 build/libs/
+gradlew -p . jar --offline
 ```
 
-> `-PblockedMode=warn` 产出 `nodetect` 变体。整合包里装有 `data_energistics` 时**必须**用这个变体，否则本模组会在启动时主动拦截。
+产物为单个 `aecraftroute-<版本>_neoforge_1.21.1.jar`。构建过程不写入游戏实例，把产物放入 `mods/` 是独立的显式步骤。放入前须删除 `mods/` 目录中已有的 `aecraftroute*.jar` 与更名前遗留的 `ae2vm*.jar`，否则启动时因 modId 重复而失败。
+
+测试分为三组任务，正确性回归与性能测量分开：
+
+```bash
+gradlew test                      # 单元与集成回归，排除 benchmark 标签
+gradlew routeFunctionalTest       # 路线功能回归
+gradlew productionBenchmark       # 生产计划器微基准
+```
+
+当前离线回归为 38 套 271 项，0 失败、0 错误、0 跳过。真实网格验证在独立实例中进行：搭建包含控制器、驱动器、合成存储器、样板供应器、分子装配器与合成 CPU 的 ME 网络，使用真实编码样板与真实下单。自检按场景逐个运行：净增长型回料环（`growth`）、取消（`cancel`）、CPU 自存档重载（`reload`）、AdvancedAE 量子计算机（`advanced`）、请求方部分接受产物（`partial`）、画布有限路径（`paths`），以及服务器停止前后分两次进行的续跑（`restart1`、`restart2`）。
 
 ---
 
-## 许可与出处
+## 十、许可与致谢
 
-LGPL v3，见 [LICENSE](LICENSE)。版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+本项目以 LGPL-3.0 授权，全文见 [LICENSE](LICENSE)。版本历史见 [CHANGELOG.md](CHANGELOG.md)。第三方作品的引用方式与授权见 [ATTRIBUTIONS.md](ATTRIBUTIONS.md)，早期实现的历史见 [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md)。

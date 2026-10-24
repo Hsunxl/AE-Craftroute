@@ -1,106 +1,147 @@
-# AE2 VM — AE2 Crafting Planner
+# AE-Craftroute — Crafting Planner for Applied Energistics 2
 
 ![Minecraft](https://img.shields.io/badge/Minecraft-1.21.1-blue?logo=minecraft)
-![NeoForge](https://img.shields.io/badge/NeoForge-21.1.259+-orange)
+![NeoForge](https://img.shields.io/badge/NeoForge-21.1.169+-orange)
 ![AE2](https://img.shields.io/badge/AE2-19.2.18+-green)
 ![Java](https://img.shields.io/badge/Java-21-red)
 ![License](https://img.shields.io/badge/License-LGPL%20v3-blue)
 
 > **中文版**: [README.md](README.md)
 
-**AE2 VM** is a NeoForge addon for [Applied Energistics 2](https://github.com/AppliedEnergistics/Applied-Energistics-2). It replaces AE2's recursive crafting-tree traversal with **a single provable planning search**: working backwards from the request while accounting for real inventory, it decides *what* to craft and *in which order*, then hands the result — together with an **executable program** — to the crafting CPU.
+AE-Craftroute is a NeoForge addon for [Applied Energistics 2](https://github.com/AppliedEnergistics/Applied-Energistics-2). It replaces AE2's crafting feasibility calculation: the verdict on a crafting request comes from a single search, which yields both the intermediate products required and the order in which they execute, handed to the crafting CPU as an executable program. The artifact is a single jar under `build/libs/`.
 
-It targets three kinds of recipes that a recursive algorithm structurally cannot handle:
-
-- **Cyclic recipes** (`A→B`, `B→2A` — feedback loops): recursion either expands forever or simply fails.
-- **Incremental / net production** (the output feeds its own recipe, so only the net gain is really required).
-- **Real executable ordering** (feedback items must flow between assemblers in sequence; they are not one-shot consumables).
+All computation is performed by this addon; AE2's pattern definitions and inventory structures are not modified. Interaction with AE2 uses public interfaces and Mixin injection; the injection targets are listed in [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
 ---
 
-## What it actually changes
+## 1. Three recipe structures recursion does not fit
 
-AE2 decides "can this be crafted?" by recursively expanding the pattern tree. For the three cases above that expansion either blows the stack or produces **a plan that cannot actually be executed** — which is why players see two contradictory symptoms: a craft that is obviously possible is reported as missing materials, or a plan looks feasible but the CPU sits at 0 progress.
+AE2 decides whether a crafting request can complete by recursively expanding the pattern tree: starting from the target, each material is replaced by the pattern that produces it, until every leaf is covered by stock. That criterion matches execution for most recipes and does not match it for the following three structures.
 
-AE2 VM replaces that step with **a provable search**:
+**Cyclic recipes.** A cyclic recipe consists of patterns that are each other's inputs, for example `A → B` and `B → 2A`. Each consumes the other's output, so the expansion has no naturally terminating leaf: it either continues until the stack overflows or a depth limit is reached, or it reports the recipe as uncraftable at the first cycle. Such a recipe can run continuously and yield a net increment given any participating item as starting capital; its executability depends on that capital and on the net increment of the cycle, not on whether the expansion terminates.
 
-1. **Snapshot** (`RouteSnapshot`): reads this network's patterns and stock once and uses it as the sole basis for the whole calculation. The canvas preview and the real submission go through the same snapshot builder, so what you see and what runs cannot disagree.
-2. **Plan** (`NetworkProductionPlanner`): a backward-coverability search that explicitly tracks, per material, how much is needed, how much stock covers, and which pattern supplies the remainder. Cycles and net production fall out of the inventory accounting naturally.
-3. **Proof** (`CertifiedCraftingPlan`): a result is returned only after a forward replay validates that every step's inputs really are available at the moment it executes. The plan carries `usedItems` (the starting capital), `program` (the execution order), and `missingItems()` is always empty — **the plan itself is the proof of executability**.
-4. **Execution** (CPU mixin): with a certified program attached, the CPU dispatches in program order, keeps feedback items in the CPU inventory for reuse by the next round, and delivers the final output only after `waitingFor` is empty and the program is complete.
+**Net increment.** When a pattern's output is also an input of that pattern or of another, the actual requirement is the net increment. Recursive expansion counts each level as a fresh consumption, so the same material enters the demand total more than once and the reported demand exceeds what execution requires.
 
-**Four outcomes, kept strictly distinct** (this is the core fix for fake "missing material" reports):
+**Order dependency.** Feedback items move between assemblers in a fixed order: the output of one step must enter a buffer before it can serve as the input of the next. The product of recursive expansion is a bill of materials carrying no ordering information. A valid bill and an executable plan are two different conditions; the former does not imply the latter.
 
-| Outcome | Meaning |
-|---------|---------|
-| `feasible` | Proven craftable; ships a starting-capital list and an execution program |
-| `UNREACHABLE` | Proven **impossible** (genuinely missing / no producer) |
-| `LIMIT` | **Undecided** within budget — not a shortage |
-| `UNSUPPORTED` | Cannot be modeled precisely — not treated as a shortage |
-
-Only `UNREACHABLE` ever says "missing". Budget exhaustion and unsupported pattern semantics are **never** disguised as shortages.
+These three structures produce two kinds of report in game: an executable recipe reported as missing materials, or a plan reported as feasible while CPU progress stays at zero. Both share one mechanism: the criterion being evaluated differs from the criterion execution requires. Recursion evaluates whether the expansion terminates; execution requires whether this batch can be produced in order.
 
 ---
 
-## Crafting canvas
+## 2. The replacement calculation
 
-Beyond replacing the algorithm, the mod ships a **crafting-tree canvas** that draws the route AE2 computed, letting you pick which pattern each node uses and how far to expand it.
+The verdict is split into four stages. The output of each stage is the sole input of the next, and no mutable state is shared between stages.
 
-- **Authoritative verdicts**: the feasibility, starting-capital list and batch counts shown all come from the same certified planner on the server — not a client-side estimate. Changing the target re-requests, so the verdict you see matches the one at submission time.
-- **Per-material locking**: pick "this material uses that pattern" per node. Locking is applied per material, and the canvas choices enter the server-side calculation verbatim.
-- **Whole-canvas atomic apply**: submit every node's choice as one unit; the server validates each and applies them all at once.
-- **Per-node conflict diagnostics**: if one material is assigned two different patterns on the canvas, it does not silently pick one — it names the conflicting material and asks you to settle it first. A selected pattern that has left the network is likewise reported per material.
+**1. Snapshot.** `RouteSnapshot` reads the network's current pattern definitions and stock and forms an immutable snapshot. Canvas preview and real submission build their snapshot through the same constructor, so both paths use the same input.
+
+**2. Search.** `NetworkProductionPlanner` works backwards from the target and keeps a separate account per material: total demand, the part covered by stock, and the pattern that covers the remainder. Cycles and net increments need no separate branch under this accounting: feedback consumption and regeneration are recorded on the same account, and the net increment follows directly from the bookkeeping.
+
+**3. Replay validation.** A candidate plan found by the search is not returned immediately. The candidate program is replayed forward in order, checking step by step whether the inputs of each step are satisfied at the moment that step executes. A plan that passes the whole replay is returned as a `CertifiedCraftingPlan`. That object carries the starting capital `usedItems` and the execution order `program`; its `missingItems()` is always empty, because passing the replay means the inputs of every step are satisfied at the moment it executes.
+
+**4. Execution.** The CPU bridge dispatches in program order, keeps feedback in the CPU inventory for the next round, and delivers the final output once `waitingFor` is empty and the program is complete. Program and cursor persist with the CPU's NBT; after a server stop and restart, an in-flight job resumes from the save and continues.
+
+### Conditions behind the four outcomes
+
+| Outcome | Condition |
+|---------|-----------|
+| `feasible` | The search found a plan and the forward replay passed in full; returned with a starting-capital list and an execution program |
+| `UNREACHABLE` | Proven infeasible: the required material is short across both stock and producible supply, or no pattern produces it |
+| `LIMIT` | The verdict was not reached within the given budget; the plan is neither proven feasible nor proven infeasible |
+| `UNSUPPORTED` | Pattern semantics cannot be modelled exactly; the plan took no part in the feasibility verdict |
+
+A missing-material message is produced only by `UNREACHABLE`. `LIMIT` and `UNSUPPORTED` return their own outcome values, and their interface text is not phrased as a material shortage.
 
 ---
 
-## Verification
+## 3. Crafting canvas
 
-Correctness is verified on a **real ME grid in an independent instance**, not by unit tests alone:
+Beyond the calculation, the addon provides a crafting-tree canvas that renders the result as an editable node graph.
 
-- **Offline**: 189 tests pass, covering the planner, canvas preview/apply, payload limits, and a fixed regression built on an ae2cs aggregator chain (8 dust + 8 charged quartz + 32 sand → 32 seeds).
-- **Real grid**: a dedicated dev server with a genuine ME network (controller, drive, crafting storage, pattern providers, molecular assemblers, crafting CPU), real encoded patterns and real requests:
-  - a three-node feedback loop (emerald→diamond→2 lapis→emerald), asking for 3 diamonds starting from a single emerald → delivers 3, stock drained to zero;
-  - cancellation, CPU save roundtrip, and **resume after a real server restart** (a fresh process restores the in-flight job from the save and finishes delivery);
-  - partial delivery when the requester accepts only part of the output;
-  - the same program executed on an AdvancedAE quantum computer.
+- **Source of verdicts.** Feasibility, starting capital and batch counts shown on the canvas all come from the server-side planner; the client performs no independent estimate. Changing the target issues a new request, so the canvas verdict and the verdict used at submission come from the same source.
+- **Per-material pattern locking.** A single material can be pinned to a specific pattern. Locking applies per material, and canvas choices enter the server-side calculation verbatim, without client-side conversion.
+- **Whole-canvas atomic apply.** One submission carries every node's choice; the server validates each and applies them at once. No partially applied intermediate state exists.
+- **Conflict diagnostics.** When one material is assigned two different patterns, the server names the conflicting material and requires it to be settled first, rather than silently choosing one. A selected pattern that has left the network is likewise reported per material.
 
 ---
 
-## Usage
+## 4. Asynchronous planning and budgets
+
+A plan involves pattern-graph traversal, input-variant enumeration and replay validation, with cost growing in network size. Computing it all inside the request thread puts the cost peak directly on the server tick. Planning is therefore implemented as a state machine driven by server ticks.
+
+- **Reads separated from computation.** Grid and stock reads happen only on the server thread; worker threads receive immutable snapshots and hold no grid reference.
+- **One budget across the chain.** Queue wait, snapshot capture, variant enumeration and replay validation share a single deadline. Exhausting it at any stage returns `LIMIT`; an unfinished search is not reported as a material shortage.
+- **Revalidation before commit.** After the computation, the current network state is validated once before committing. If patterns or stock changed meanwhile, the result is reported as an expired plan and a retry is required; no plan based on stale state is committed.
+- **Cancellation propagation.** A cancel cascades to in-flight worker tasks and queued jobs. Closing the menu, switching networks, logging out and stopping the server all invalidate the job.
+
+---
+
+## 5. Modelling pattern semantics
+
+A pattern is not always "some inputs for some outputs". The following three semantics follow one rule: included in the calculation when they can be modelled exactly, otherwise reported as `UNSUPPORTED`.
+
+**Finite-durability tools.** A tool used in crafting loses one durability step per use. The resulting item identity, whether the final break returns an item, and how remaining durability persists with the job are all part of the execution protocol. The current implementation validates transitions against the actual consumed damage state (`FiniteToolTransitions`) and returns `UNSUPPORTED` for cases that protocol cannot describe fully. Flattening a tool count into an amortised, infinitely reusable number yields a plan that passes formally and fails at execution, so that approximation is not used.
+
+**Family-level aggregation of alternative inputs.** When one input slot of a pattern accepts a family of equivalent materials and the slot's demand must be distributed among them, the distribution is solved as capacitated bipartite matching (`FuzzyFamilyAllocator`). Slots with identical candidate sets merge into one demand node, and after solving, the flow is distributed back into the original physical slots. The synthesised family identity is not extracted, not persisted, and not sent to a pattern provider.
+
+**Wrapped patterns.** Outer wrapper patterns (scaled patterns, for instance) are supported only at the level of their public interface (`ScaledPatternCompat`). One outer dispatch corresponds to one task, keeping the outer input and output quantities and the provider identity; the inner pattern does not enter the executable plan.
+
+---
+
+## 6. Installation and use
 
 ### Installation
 
-1. Install [NeoForge](https://neoforged.net/) and [Applied Energistics 2 19.2.18+](https://www.curseforge.com/minecraft/mc-mods/applied-energistics-2)
-2. Drop `ae2vm-nodetect-<version>.jar` into `mods/` (**only one** — two copies cause a duplicate modId error)
-3. Start the game; a `AE2 VM <version> (built ...)` banner in the log means it loaded
+1. Install [NeoForge](https://neoforged.net/) and [Applied Energistics 2 19.2.18+](https://www.curseforge.com/minecraft/mc-mods/applied-energistics-2).
+2. Place `aecraftroute-<version>_neoforge_1.21.1.jar` in `mods/`. Keep only that one copy; duplicates raise a modId error.
+3. Start the game. A build banner in the log indicates it loaded.
 
-### In game
+The mod id is `aecraftroute` and the package is `com.aecraftroute.addon`; both were renamed from `ae2vm` in `1.13.19-local.34`. Jobs in flight in existing saves are not affected: when a new NBT key is absent, the reader falls back to the old key, and the next save writes the new key and clears the old one. Third-party integrations update their imports to the new package and class names; the public method names are unchanged.
 
-Works out of the box:
+### Dependencies
 
-1. Encode AE2 patterns as usual and place them in pattern providers
-2. Request a craft from an ME terminal
-3. Planning and execution are automatic
+| Dependency | Kind | Version requirement |
+|------------|------|---------------------|
+| Minecraft | required | 1.21.1 |
+| NeoForge | required | ≥ 21.1.169 (21.1.259 used in development) |
+| Applied Energistics 2 | required | ≥ 19 (19.2.18 used in development) |
+| AdvancedAE | optional | 1.6.12; provides the quantum-computer execution bridge; without it that mixin group is not applied |
+| AE2 Crafting Tree | optional (client) | Canvas integration target (`@Pseudo` mixin); without it that injection is skipped and the canvas uses the built-in UI |
+| JEI | optional (client) | ≥ 19.57.0; provides the recipe-page import button |
+| Configured | optional | 2.x; provides the in-game config editor, which the config does not depend on |
 
-**Config switch**: setting `proxyEnabled=false` in `config/ae2vm-common.toml` turns off the takeover and returns to AE2's native recursion (when canvas constraints are set, it reports an explicit error instead of quietly bypassing them).
+Optional dependencies are soft: when the corresponding mod is absent, the related entry point does not load, and the main planning and execution paths are unaffected.
 
-**Third-party patterns**: requests from other mods (ECO and friends) pass through to native logic by default; a mod that wants takeover can register explicitly (see below).
+### Use
+
+No extra configuration is required.
+
+1. Encode AE2 patterns as usual and place them in pattern providers.
+2. Request a craft from an ME terminal.
+3. Planning and execution complete automatically.
+
+### Configuration
+
+The config file is `config/aecraftroute-common.toml`. Setting `proxyEnabled=false` disables the takeover and returns calculation to AE2's native recursion; if canvas constraints are set at that point, an explicit error is returned rather than executing around them.
+
+When upgrading from a pre-rename build, if the config directory holds only `ae2vm-common.toml`, the first start copies it to the new config file name and renames the old file to `ae2vm-common.toml.migrated`.
+
+Requests from third-party mods pass through to native logic by default; a mod that wants takeover registers explicitly, as in the next section.
 
 ---
 
-## Third-party integration (development)
+## 7. Third-party integration
 
 ```java
-import com.ae2vm.addon.api.AE2VMCrafting;
-import com.ae2vm.addon.api.AE2VMCraftingRegistry;
+import com.aecraftroute.addon.api.CraftRouteCrafting;
+import com.aecraftroute.addon.api.CraftRouteCraftingRegistry;
 
-// Register in your @Mod constructor (marker = substring of the class name):
-// "requests from my mod may be taken over"
-AE2VMCraftingRegistry.register("mymod");
+// Register in your @Mod constructor: requests from this mod may be taken over
+// (marker is a substring of the class name).
+CraftRouteCraftingRegistry.register("mymod");
 
-// Optional integration: use our planner when present, otherwise fall back
-if (AE2VMCrafting.isLoaded()) {
-    CompletableFuture<ICraftingPlan> plan = AE2VMCrafting.calculate(
+// Optional integration: use this addon's calculation when present, else fall back
+if (CraftRouteCrafting.isLoaded()) {
+    CompletableFuture<ICraftingPlan> plan = CraftRouteCrafting.calculate(
         grid, requester, what, amount, strategy);
     plan.thenAccept(p -> submitToCpu(p, requester));
 } else {
@@ -108,85 +149,74 @@ if (AE2VMCrafting.isLoaded()) {
 }
 ```
 
-- **Registration** (`register`) decides whether requests from your mod are taken over; **calculation** (`calculate`) actively calls this mod's planner.
-- AE2's own (`appeng.*`) requests are always taken over; unregistered third-party mods keep their own logic.
-- The dependency is `compileOnly`; without this mod installed `isLoaded()` returns `false` and everything works as before.
-- `calculate()` runs asynchronously; `calculateSync()` blocks the calling thread and is for non-server-main threads only.
+- Registration (`register`) decides whether requests this mod issues are taken over; calculation (`calculate`) actively calls this addon's planner. The two are independent.
+- AE2's own (`appeng.*`) requests are always taken over; unregistered mods keep their own logic.
+- The dependency is `compileOnly`. Without this addon installed, `isLoaded()` returns `false` and caller behaviour is unchanged.
+- `calculate()` runs asynchronously; `calculateSync()` blocks the calling thread and refuses to run on the server main thread.
 
 ---
 
-## Project structure
+## 8. Project structure
 
 ```
-src/main/java/com/ae2vm/addon/
-├── AE2VMAddon.java                  # Mod entry (compat checks / build banner)
-├── BuildInfo.java                   # Build stamp + /ae2vm build command
-├── api/
-│   ├── AE2VMCrafting.java           # Public API (calculate / planNow)
-│   ├── AE2VMCraftingRegistry.java   # Third-party registration
-│   └── DispatchTrace.java           # Which CPU logic attached a certified program
+src/main/java/com/aecraftroute/addon/
+├── CraftRouteAddon.java                # Mod entry (build banner, config migration)
+├── BuildInfo.java                      # Build stamp and /aecraftroute build command
+├── api/                                # Public API and third-party registration
+├── compat/                             # Wrapper-pattern compat, external mod adapters (advancedae, thunderbolt stubs)
+├── compiler/                           # Finite-durability input interface
+├── config/                             # Configuration definitions
 ├── planner/
-│   ├── ProductionPlanner.java       # Backward coverability + forward replay
-│   ├── NetworkProductionPlanner.java# Pattern graph → plan
-│   ├── CertifiedCraftingPlan.java   # Plan + executable program
-│   ├── PatternVariant.java          # Pattern slot combinations
-│   ├── ProductionJob.java           # In-CPU program execution state (persistable)
-│   └── ProductionPlanningException.java # The four outcomes
-├── route/
-│   ├── RouteSnapshot.java           # Single snapshot source (patterns + stock)
-│   ├── RoutePlanView.java           # Authoritative plan view for the canvas
-│   ├── RouteIntent.java             # Per-material locking + conflict diagnostics
-│   ├── RouteApply.java              # Whole-canvas atomic apply
-│   ├── RouteNetwork.java            # Canvas network protocol
-│   └── client/                      # Canvas UI
-├── vm/
-│   ├── TwoNodeGrowthPlanner.java    # Two-node feedback ring detection + ordering
-│   ├── NetProduction.java           # Net-production check
-│   └── FeedbackReservation.java     # Feedback reservation
-├── mixin/
-│   ├── CraftingServiceMixin.java    # Takes over beginCraftingCalculation
-│   ├── ProductionCpuMixin.java      # AE2 crafting CPU execution bridge
-│   ├── AdvancedProductionCpuMixin.java # AdvancedAE quantum CPU bridge
-│   └── GrowthCpuMixin.java / AdvancedGrowthCpuMixin.java # Fallback for non-certified plans
-└── selftest/                        # Independent-instance self test (not shipped)
+│   ├── ProductionPlanner.java          # Backward accounting search, forward replay
+│   ├── NetworkProductionPlanner.java   # Network pattern graph → plan
+│   ├── CertifiedCraftingPlan.java      # Plan and execution program
+│   ├── ProductionPlanCache.java        # Bounded plan cache compared by value
+│   ├── PatternVariant(s).java          # Exact combinations of pattern input slots
+│   ├── FiniteToolTransitions.java      # Transition validation for finite tools
+│   ├── FuzzyFamilyAllocator.java       # Capacitated matching of material families
+│   └── ProductionJob.java              # In-CPU execution state (persistable)
+├── route/                              # Canvas, planning service and network rules
+│   ├── RouteSnapshot.java              # Single snapshot source (patterns and stock)
+│   ├── RoutePlanningService.java       # Server-tick driven asynchronous planning
+│   ├── RouteCanvasPlanner.java         # Canvas finite paths → certified plan
+│   ├── ForcedRoutePlanner.java         # Finite-path execution contract
+│   ├── RouteApply.java                 # Whole-canvas atomic apply
+│   └── client/                         # Canvas UI
+├── telemetry/                          # Outcome recording and log throttling
+├── mixin/                              # Crafting service and CPU execution bridges
+├── vm/                                 # Feedback-ring detection and net production
+└── selftest/                           # Independent-instance self test (not shipped)
+
+src/main/resources/
+├── META-INF/neoforge.mods.toml
+├── aecraftroute.mixins.json
+├── aecraftroute.png
+└── assets/ae2/screens/aecraftroute_route.json
 ```
 
 ---
 
-## Mod info
-
-| Item | Value |
-|------|-------|
-| Mod ID | `ae2vm` |
-| Name | AE2 VM |
-| Package | `com.ae2vm.addon` |
-
-### Dependencies
-
-| Dependency | Version |
-|------------|---------|
-| Minecraft | 1.21.1 |
-| NeoForge | ≥ 21.1.169 (tested on 21.1.259) |
-| Applied Energistics 2 | ≥ 19.2.17 (tested on 19.2.18) |
-| AdvancedAE (optional) | 1.6.12 |
-| Configured (optional, in-game config UI) | 2.x |
-
----
-
-## Building
+## 9. Building and testing
 
 ```bash
-# Single build (output in build/libs/)
-gradlew -p . jar --offline -PblockedMode=warn
-
-# Build + bump version + copy into mods
-buildBoth.bat
+# Single build; output in build/libs/
+gradlew -p . jar --offline
 ```
 
-> `-PblockedMode=warn` produces the `nodetect` variant. In packs that ship `data_energistics` this variant is **mandatory** — otherwise the mod refuses to start on purpose.
+The output is a single `aecraftroute-<version>_neoforge_1.21.1.jar`. The build does not write into a game instance; placing the output in `mods/` is a separate explicit step. Remove any existing `aecraftroute*.jar` and any `ae2vm*.jar` left over from before the rename, otherwise startup fails with a duplicate modId.
+
+Tests run as three separate tasks, keeping correctness regressions apart from performance measurement:
+
+```bash
+gradlew test                      # Unit and integration regressions, benchmark tag excluded
+gradlew routeFunctionalTest       # Route functional regressions
+gradlew productionBenchmark       # Planner micro-benchmarks
+```
+
+The current offline regression is 38 suites and 271 tests, with 0 failures, 0 errors and 0 skipped. Real-grid verification runs in an independent instance: a genuine ME network with controller, drive, crafting storage, pattern providers, molecular assemblers and a crafting CPU, using real encoded patterns and real requests. The self-test runs its scenarios one at a time: a net-growth feedback ring (`growth`), cancellation (`cancel`), CPU reload from its own saved NBT (`reload`), an AdvancedAE quantum computer (`advanced`), partial acceptance of output by the requester (`partial`), a finite canvas path (`paths`), and resume across a server stop, split into two runs (`restart1`, `restart2`).
 
 ---
 
-## License
+## 10. License and acknowledgement
 
-LGPL v3, see [LICENSE](LICENSE). Version history in [CHANGELOG.md](CHANGELOG.md).
+Licensed under LGPL-3.0; the full text is in [LICENSE](LICENSE). Version history is in [CHANGELOG.md](CHANGELOG.md). The use and licensing of third-party work are in [ATTRIBUTIONS.md](ATTRIBUTIONS.md); the history of the earlier implementation is in [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).

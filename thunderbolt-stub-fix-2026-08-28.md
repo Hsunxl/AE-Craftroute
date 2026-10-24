@@ -41,9 +41,11 @@ public static final String ENGINE_ID = AE2VMBatchCraftingPlanner.ENGINE_ID;  // 
 
 `src/main/java/com/moakiee/thunderbolt/core/crafting/...` 下的 37 个 reference 框架 source 保留（编译期依赖 thunderbolt-2.0-alpha.jar），但**它们在运行时不会被加载**（main 中无外部引用，`AE2VMAddon.class` 字节码已无 Thunderbolt 引用），所以玩家没装 thunderbolt 也不会触发 NoClassDefFoundError。
 
-`build.gradle` 的 `compileOnly files('E:/TB ThirdParty/.../thunderbolt-2.0-alpha.jar')` 保留（让 37 个 source 编译过），添加注释说明 re-enable 步骤。
+`build.gradle` 的 `compileOnly files('<本地闪电库路径>/thunderbolt-2.0-alpha.jar')` 保留（让 37 个 source 编译过），添加注释说明 re-enable 步骤。
 
 ## 验证
+
+> 本节命令中的 `-PblockedMode=warn` 属于当时的记录。该构建属性连同双变体机制已在更名版本中整体移除，命令现应写作 `gradlew.bat clean jar --no-daemon`。
 
 - 编译：`gradlew.bat clean jar -PblockedMode=warn --no-daemon` → BUILD SUCCESSFUL
 - 字节码检查：`AE2VMAddon.class` 中**无** `ThunderboltCompat` / `registerIfPresent` 字符串
@@ -52,7 +54,7 @@ public static final String ENGINE_ID = AE2VMBatchCraftingPlanner.ENGINE_ID;  // 
 
 ## 玩家端验证
 
-- `E:\MC\.minecraft\versions\1.21.1-NeoForge_21.1.242\crash-reports` 之前的 crash-2026-08-28_10.59.29-client.txt 表明 `com.moakiee.thunderbolt.api.crafting.CraftingPlanningEngine` 缺失
+- 玩家端崩溃报告目录（本地 Minecraft 实例的 `crash-reports`）中已有的崩溃文件表明 `com.moakiee.thunderbolt.api.crafting.CraftingPlanningEngine` 缺失
 - 修复后 jar 中不再加载 ThunderboltCompat 类，玩家端 commonSetup.enqueueWork 链路应不再触发 NoClassDefFoundError
 
 ## 关键观察

@@ -1,0 +1,17 @@
+# 统一换行，避免 Windows / Linux 反复出现整文件 diff
+* text=auto
+
+*.java text
+*.gradle text
+*.json text
+*.toml text
+*.md text
+
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf
+gradlew text eol=lf
+
+*.jar binary
+*.png binary
+*.ogg binary
