@@ -176,6 +176,13 @@ tasks.named('compileJava', JavaCompile) {
     ]
 }
 
+// The build stamp is generated output, not a source file: the sources artifact must not
+// carry it, and it must not read the directory without depending on the task that writes it.
+tasks.named('sourcesJar', Jar) {
+    dependsOn 'generateBuildStamp'
+    exclude 'aecraftroute-build.properties'
+}
+
 // The selftest harness and the QA fixtures exist only for the independent
 // verification instances; both are compiled into the dev classpath (so the server
 // and client runs can load them) but neither is shipped in the release jar.
