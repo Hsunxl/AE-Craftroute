@@ -50,10 +50,37 @@ public abstract class CraftingServiceMixin {
      * selection. Never retry a refusal that consumed or could consume inputs (for example
      * MISSING_INGREDIENT), and never submit twice after a success.
      */
+    @Inject(method = "submitJob", at = @At("HEAD"))
+    private void aecraftroute$probeNativeSubmitEntry(ICraftingPlan plan, ICraftingRequester requestingMachine,
+            ICraftingCPU target, boolean prioritizePower, IActionSource src, CallbackInfoReturnable<ICraftingSubmitResult> cir) {
+        if (com.aecraftroute.addon.config.CraftRouteConfig.isDebugLogging())
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] native submitJob entry: plan={} target={}",
+                    CpuProbe.describePlan(plan), CpuProbe.describe(target));
+    }
+
+    @Inject(method = "submitJob", at = @At("RETURN"))
+    private void aecraftroute$probeNativeSubmitReturn(ICraftingPlan plan, ICraftingRequester requestingMachine,
+            ICraftingCPU target, boolean prioritizePower, IActionSource src, CallbackInfoReturnable<ICraftingSubmitResult> cir) {
+        var result = cir.getReturnValue();
+        if (result != null && !result.successful())
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] native submitJob return: plan={} target={} error={} detail={}",
+                    CpuProbe.describePlan(plan), CpuProbe.describe(target), result.errorCode(), result.errorDetail());
+    }
+
     @WrapMethod(method = "submitJob")
     private ICraftingSubmitResult aecraftroute$retryOfflineCpu(ICraftingPlan plan,
             ICraftingRequester requestingMachine, ICraftingCPU target, boolean prioritizePower, IActionSource src,
             Operation<ICraftingSubmitResult> original) {
+        // Thunderbolt 2.0.1 rejects every non-native ICraftingPlan inside the wrapped
+        // original body, before AE2 or AdvancedAE can select a CPU. Certified plans must
+        // bypass that service HEAD entirely and use the actual compatible cluster contract.
+        if (plan instanceof CertifiedCraftingPlan) {
+            return target == null
+                    ? com.aecraftroute.addon.compat.CertifiedCpuDispatcher.selectAndSubmit(
+                            grid, plan, requestingMachine, src, prioritizePower)
+                    : com.aecraftroute.addon.compat.CertifiedCpuDispatcher.submit(
+                            grid, plan, target, requestingMachine, src);
+        }
         ICraftingSubmitResult result = original.call(plan, requestingMachine, target, prioritizePower, src);
         if (result == null || result.successful() || result.errorCode() != CraftingSubmitErrorCode.CPU_OFFLINE) return result;
         var attempts = new java.util.ArrayList<String>();

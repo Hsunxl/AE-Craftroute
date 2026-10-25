@@ -53,6 +53,10 @@ neoForge {
             jvmArguments.add('-Daecraftroute.selftest.exit=true')
             // Plain String, not a GString: ModDevGradle casts jvmArguments entries to String.
             jvmArguments.add('-Daecraftroute.selftest.task=' + providers.gradleProperty('selftestTask').getOrElse('growth'))
+            if (providers.gradleProperty('mixinExport').isPresent()) {
+                jvmArguments.add('-Dmixin.debug.export=true')
+                jvmArguments.add('-Dmixin.debug.export.filter=appeng.me.service.CraftingService')
+            }
         }
     }
 }
@@ -78,10 +82,13 @@ dependencies {
     testRuntimeOnly files(providers.gradleProperty('ae2ctJar').getOrElse('../../../mods/ae2ct-1.21.1-1.1.1.jar'))
     implementation "org.appliedenergistics:appliedenergistics2:${ae2_version}"
     compileOnly "io.github.llamalad7:mixinextras-neoforge:0.5.3"
-    // Thunderbolt-Core was an optional compile-only dependency up to v1.13.15. Since v1.13.16
-    // its algorithm library is stubbed out (com.aecraftroute.addon.compat.thunderbolt), nothing in the
-    // sources references it, and no artifact is needed to build. Re-enabling it means restoring
-    // the v1.13.15 sources and the dependency together, so nothing is declared here.
+    // Thunderbolt-Core algorithm library remains stubbed. The installed 2.0.1 jar is needed
+    // only for its public ExtendedCraftingCpuCluster submission-compatibility interface.
+    def thunderboltJar = providers.gradleProperty('thunderboltJar').getOrElse('../../../mods/thunderbolt-2.0.1.jar')
+    compileOnly files(thunderboltJar)
+    if (providers.gradleProperty('thunderboltSelftest').isPresent()) {
+        runtimeOnly files(thunderboltJar)
+    }
 
     testImplementation 'org.spongepowered:mixin:0.8.5'
     testImplementation platform('org.junit:junit-bom:5.10.2')
