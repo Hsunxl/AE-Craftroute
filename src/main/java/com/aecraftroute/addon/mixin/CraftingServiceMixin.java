@@ -79,7 +79,7 @@ public abstract class CraftingServiceMixin {
                     ? com.aecraftroute.addon.compat.CertifiedCpuDispatcher.selectAndSubmit(
                             grid, plan, requestingMachine, src, prioritizePower)
                     : com.aecraftroute.addon.compat.CertifiedCpuDispatcher.submit(
-                            grid, plan, target, requestingMachine, src);
+                            grid, plan, target, requestingMachine, src, prioritizePower);
         }
         ICraftingSubmitResult result = original.call(plan, requestingMachine, target, prioritizePower, src);
         if (result == null || result.successful() || result.errorCode() != CraftingSubmitErrorCode.CPU_OFFLINE) return result;

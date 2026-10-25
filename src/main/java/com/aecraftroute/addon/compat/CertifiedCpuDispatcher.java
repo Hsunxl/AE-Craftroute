@@ -19,7 +19,7 @@ public final class CertifiedCpuDispatcher {
     private CertifiedCpuDispatcher() {}
 
     public static ICraftingSubmitResult submit(IGrid grid, ICraftingPlan plan, ICraftingCPU target,
-            ICraftingRequester requester, IActionSource source) {
+            ICraftingRequester requester, IActionSource source, boolean prioritizePower) {
         if (target instanceof CraftingCPUCluster nativeCpu) {
             if (!nativeCpu.isActive()) return CraftingSubmitResult.CPU_OFFLINE;
             if (nativeCpu.isBusy()) return CraftingSubmitResult.CPU_BUSY;
@@ -28,7 +28,13 @@ public final class CertifiedCpuDispatcher {
         }
         Object cluster = advancedCluster(target);
         if (cluster != null) return submitAdvanced(cluster, grid, plan, requester, source);
-        return CraftingSubmitResult.NO_CPU_FOUND;
+        // An incompatible explicit selection (Trinity/ECO/Thunderbolt extended CPU) cannot
+        // run the certified program. The plan names patterns, not a machine, so redirect to
+        // a compatible executor instead of refusing the order.
+        com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                "[AE-Craftroute] selected CPU cannot run a certified program: {}; redirecting to a compatible CPU",
+                com.aecraftroute.addon.telemetry.CpuProbe.describe(target));
+        return selectAndSubmit(grid, plan, requester, source, prioritizePower);
     }
 
     public static ICraftingSubmitResult selectAndSubmit(IGrid grid, ICraftingPlan plan,
@@ -43,7 +49,7 @@ public final class CertifiedCpuDispatcher {
                 if (cluster == null) continue; // Never hand a certified program to Trinity/ECO/other protocols.
                 if (!canAutoSelect(cluster, source)) continue;
             }
-            ICraftingSubmitResult result = submit(grid, plan, candidate, requester, source);
+            ICraftingSubmitResult result = submit(grid, plan, candidate, requester, source, prioritizePower);
             if (result.successful()) return result;
             last = result;
             // Offline/busy/too-small may differ between candidates. A concrete plan/input

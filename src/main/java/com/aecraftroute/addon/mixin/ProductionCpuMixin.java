@@ -103,13 +103,21 @@ public abstract class ProductionCpuMixin {
             return;
         }
         long accepted=access.aecraftroute$getLink().insert(key,held,Actionable.MODULATE);
+        boolean toNetwork=false;
+        if(accepted<=0) {
+            // Player-initiated jobs carry no requester link (native AE2 only builds one for
+            // machines); native semantics then return the finished output to the network.
+            var grid=cluster.getGrid();
+            if(grid!=null) accepted=grid.getStorageService().getInventory().insert(key,held,Actionable.MODULATE,cluster.getSrc());
+            toNetwork=true;
+        }
         if(accepted<=0) {
             if(aecraftroute$deliveryLogs.acquire("blocked"))
-                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery blocked: requester accepted nothing, holding {} x{}",key,held);
+                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery blocked: neither requester nor network accepted {} x{}",key,held);
             return;
         }
         if(com.aecraftroute.addon.config.CraftRouteConfig.isDebugLogging())
-            com.aecraftroute.addon.CraftRouteAddon.LOGGER.info("[AE-Craftroute] AE2 CPU delivered {} x{} to the requester, remaining was {}",key,accepted,remaining);
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.info("[AE-Craftroute] AE2 CPU delivered {} x{} to {}, remaining was {}",key,accepted,toNetwork?"the network":"the requester",remaining);
         inventory.extract(key,accepted,Actionable.MODULATE);
         remaining-=accepted; access.aecraftroute$setRemainingAmount(remaining);
         postChange(key); cluster.markDirty();
