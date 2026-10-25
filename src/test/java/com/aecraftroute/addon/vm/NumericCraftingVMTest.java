@@ -204,15 +204,14 @@ class NumericCraftingVMTest {
         }
     }
 
-    @Test void productionPlannerUsesCompiledProbeThenIndependentCertificate() {
+    @Test void productionPlannerUsesCompiledFastPathThenIndependentCertificate() {
         var recipe = new ProductionPlanner.Recipe<>("catalyzed", Map.of("tool", 1L, "ore", 1L), Map.of("tool", 1L, "out", 1L));
         var result = new ProductionPlanner<>(List.of(recipe), Map.of("tool", 1L, "ore", 1000L),
                 new ProductionPlanner.Limits(30_000, 10_000_000_000L)).solve("out", 1000);
         assertEquals(ProductionPlanner.Status.FEASIBLE, result.status());
-        // One explored batch proves the forward probe returned; backward search
-        // would at least expand the goal and its predecessor. The probe directly
-        // invokes NumericProgramCompiler.compile and NumericCraftingVM.execute.
-        assertEquals(1, result.explored());
+        // Either the aggregated DAG or the numeric probe may construct this
+        // witness. Neither may expand the 1000 requested firings into a search.
+        assertTrue(result.explored()<=2);
         assertEquals(Map.of("catalyzed", 1000L), result.counts());
         assertEquals(Map.of("tool", 1L, "ore", 1000L), result.used());
         assertEquals(1, result.program().size());

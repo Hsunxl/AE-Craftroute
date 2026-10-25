@@ -9,10 +9,12 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.*;
 import net.minecraft.world.level.Level;
 import java.util.*;
+import java.math.BigInteger;
 
 /** Shared execution protocol for native and AdvancedAE CPUs. All expected output
  * is real CPU inventory (including the target), so it can feed the next step.
- * Delivery is a separate phase, after dispatch AND every outstanding return.
+ * Delivery is a separate phase after dispatch, based on real terminal surplus
+ * rather than estimated outstanding returns.
  */
 public final class ProductionJob {
     public static final String TAG="aecraftrouteProductionV1";
@@ -30,10 +32,16 @@ public final class ProductionJob {
     }
     private final ProductionCursor<PatternVariant> cursor;
     private boolean invalid;
-    public ProductionJob(CertifiedCraftingPlan plan) { this(new ProductionCursor<>(plan.program()),false); }
+    private final Map<AEKey,Long> capital=new HashMap<>();
+    public ProductionJob(CertifiedCraftingPlan plan) {
+        this(new ProductionCursor<>(plan.program()),false);
+        capital.put(plan.finalOutput().what(),Math.max(0,plan.usedItems().get(plan.finalOutput().what())));
+    }
     private ProductionJob(ProductionCursor<PatternVariant> cursor,boolean invalid) { this.cursor=cursor; this.invalid=invalid; }
     public boolean done() { return !invalid && cursor.done(); }
-    /** Delivery may start once the program is finished AND no expected return of the
+    /** Legacy conservative gate retained for callers of older versions. Internal
+     * delivery uses deliverableAmount: estimates are not a completion condition.
+     * Delivery may start once the program is finished AND no expected return of the
      * target itself is still in flight. Returns of any other key - byproducts, catalysts
      * the machine consumed, containers a provider voided - must NOT be waited for: a
      * single return that never arrives would otherwise pin the CPU forever. Those
@@ -42,6 +50,40 @@ public final class ProductionJob {
      */
     public boolean readyToDeliver(KeyCounter waitingFor,AEKey target) {
         return target!=null && done() && waitingFor.get(target)==0L;
+    }
+    /** Actual terminal surplus, never an estimated-output or progress-percentage
+     * shortcut. Preserve the target's original working seed even if a machine
+     * underproduces. Partial acceptance can retry without losing seed or output. */
+    public long deliverableAmount(KeyCounter inventory,AEKey target,long remaining) {
+        if(target==null || remaining<=0 || !done())return 0;
+        long held=Math.max(0,inventory.get(target));if(held==0)return 0;
+        long seed;
+        try {seed=capital.computeIfAbsent(target,this::requiredCapital);}
+        catch(ArithmeticException | IllegalArgumentException malformed) {
+            invalid=true;
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Cannot recover delivery capital from saved program; no items changed",malformed);
+            return 0;
+        }
+        return Math.min(remaining,Math.max(0,held-seed));
+    }
+    /** Recover the same prefix capital from an old saved program without changing
+     * the NBT format, advancing its cursor or inferring progress from stock. */
+    private long requiredCapital(AEKey target) {
+        BigInteger required=BigInteger.ZERO,change=BigInteger.ZERO;
+        for(var block:cursor.program()) {
+            BigInteger localRequired=BigInteger.ZERO,localChange=BigInteger.ZERO;
+            for(var step:block.word()) {
+                var flow=step.recipe().recipe();
+                var input=BigInteger.valueOf(flow.inputs().getOrDefault(target,0L));
+                var delta=BigInteger.valueOf(flow.outputs().getOrDefault(target,0L)).subtract(input);
+                var seed=input.add(delta.negate().max(BigInteger.ZERO).multiply(BigInteger.valueOf(step.count()-1)));
+                localRequired=localRequired.max(seed.subtract(localChange));
+                localChange=localChange.add(delta.multiply(BigInteger.valueOf(step.count())));
+            }
+            var seed=localRequired.add(localChange.negate().max(BigInteger.ZERO).multiply(BigInteger.valueOf(block.repetitions()-1)));
+            required=required.max(seed.subtract(change));change=change.add(localChange.multiply(BigInteger.valueOf(block.repetitions())));
+        }
+        return required.max(BigInteger.ZERO).longValueExact();
     }
     /** Native tasks and the certified cursor must describe the same future work.
      * waitingFor may still contain outputs from already accepted dispatches. */

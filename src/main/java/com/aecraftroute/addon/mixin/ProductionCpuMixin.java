@@ -32,6 +32,10 @@ public abstract class ProductionCpuMixin implements com.aecraftroute.addon.compa
     @Shadow private void postChange(AEKey key) { throw new AssertionError(); }
     @Unique private ProductionJob aecraftroute$production;
     @Override public boolean aecraftroute$hasCertifiedProgram() {return aecraftroute$production!=null;}
+    @WrapMethod(method="tickCraftingLogic")
+    private void aecraftroute$executionOwnership(IEnergyService energy,CraftingService service,Operation<Void> original) {
+        com.aecraftroute.addon.compat.CertifiedExecutionScope.run(this,()->original.call(energy,service));
+    }
     @Unique private final com.aecraftroute.addon.telemetry.LogThrottle aecraftroute$deliveryLogs = new com.aecraftroute.addon.telemetry.LogThrottle();
     @Unique private Object aecraftroute$lastPosition;
     @Unique private long aecraftroute$stallSince, aecraftroute$lastStallLog;
@@ -51,7 +55,9 @@ public abstract class ProductionCpuMixin implements com.aecraftroute.addon.compa
         com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
                 "[AE-Craftroute] certified job stalled 30s: position={} remaining={} active={} suspended={} canceled={} waitingFor={} inventory={}",
                 position, aecraftroute$production.remainingCounts(), cluster.isActive(), access.aecraftroute$getSuspended(),
-                access.aecraftroute$getLink().isCanceled(), access.aecraftroute$getWaitingFor().list, inventory.list);
+                access.aecraftroute$getLink().isCanceled(),
+                com.aecraftroute.addon.telemetry.CraftingInventorySummary.of(access.aecraftroute$getWaitingFor().list),
+                com.aecraftroute.addon.telemetry.CraftingInventorySummary.of(inventory.list));
     }
 
     @Inject(method="trySubmitJob",at=@At("RETURN"))
@@ -79,7 +85,7 @@ public abstract class ProductionCpuMixin implements com.aecraftroute.addon.compa
         if(extracted==null && aecraftroute$production.allows(pattern) && aecraftroute$dispatchLogs.acquireDelayed("inputs"))
             com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
                     "[AE-Craftroute] certified dispatch waiting: current step inputs unavailable or invalid; inventory={}",
-                    inventory.list);
+                    com.aecraftroute.addon.telemetry.CraftingInventorySummary.of(inventory.list));
         return extracted;
     }
 
@@ -120,16 +126,10 @@ public abstract class ProductionCpuMixin implements com.aecraftroute.addon.compa
         if(access.aecraftroute$getLink().isCanceled() || access.aecraftroute$getSuspended() || !cluster.isActive()) return;
         long remaining=access.aecraftroute$getRemainingAmount();
         AEKey key=access.aecraftroute$getFinalOutput().what();
-        // Only the target's own outstanding returns may delay delivery. A byproduct or a
-        // catalyst the machine voided would otherwise pin this CPU forever; leftovers are
-        // stored back by native storeItems when the job ends.
-        if(!aecraftroute$production.readyToDeliver(access.aecraftroute$getWaitingFor().list,key)) {
-            if(aecraftroute$deliveryLogs.acquireDelayed("waiting"))
-                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery waiting for the last {} x{} from accepted dispatches",
-                        key,access.aecraftroute$getWaitingFor().list.get(key));
-            return;
-        }
-        long held=inventory.extract(key,remaining,Actionable.SIMULATE);
+        // Goal satisfaction is based on real stock after retaining startup capital,
+        // not on an estimated return ledger reaching zero. Late excess/byproducts
+        // follow native storage routing once the job finishes.
+        long held=aecraftroute$production.deliverableAmount(inventory.list,key,remaining);
         if(held<=0) {
             if(aecraftroute$deliveryLogs.acquire("missing"))
                 com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery pending: no {} x{} in the CPU inventory yet",key,remaining);

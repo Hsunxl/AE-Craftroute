@@ -226,6 +226,8 @@ public final class SelftestHarness {
         private IGrid grid;
         private CraftingCPUCluster cpu;
         private ICraftingCPU selectedCpu;
+        private ICraftingCPU executingCpu;
+        private int completionTicks;
         private final boolean advanced;
         private final boolean restart1;
         private final boolean restart2;
@@ -253,10 +255,10 @@ public final class SelftestHarness {
         Scenario(MinecraftServer server) {
             this.server = server;
             this.task = System.getProperty(TASK_PROP, "growth");
-            this.advanced = "advanced".equals(this.task);
+            this.advanced = "advanced".equals(this.task) || "advanced-overestimate".equals(this.task);
             this.restart1 = "restart1".equals(this.task);
             this.restart2 = "restart2".equals(this.task);
-            this.partial = "partial".equals(this.task);
+            this.partial = "partial".equals(this.task) || this.task.endsWith("overestimate");
             this.paths = "paths".equals(this.task);
             // Opt this harness in exactly like a cooperating mod would; unregistered
             // third-party requesters are deliberately left on the native path.
@@ -783,7 +785,10 @@ public final class SelftestHarness {
                 finish();
                 return;
             }
+            try {certifiedLogic();}catch(Throwable failure){fail("cannot observe actual executing CPU: "+rootCause(failure));finish();return;}
             verifyExternalBatchIsolation();
+            verifyThunderboltBatchIsolation();
+            if(task.endsWith("overestimate")) addOverestimatedReturns();
             link = result.link();
             if (link != null) {
                 requester.jobStateChange(link);
@@ -832,6 +837,44 @@ public final class SelftestHarness {
             } catch(Throwable failure) {fail("external batch isolation failed: "+rootCause(failure));}
         }
 
+        private Object certifiedLogic() throws ReflectiveOperationException {
+            for(var candidate:grid.getCraftingService().getCpus()) {
+                if(!candidate.isBusy())continue;
+                Object logic=candidate.getClass().getField("craftingLogic").get(candidate);
+                if(com.aecraftroute.addon.compat.CertifiedExecutionOwner.blocksExternalBatch(logic)){executingCpu=candidate;return logic;}
+            }
+            throw new IllegalStateException("No active certified CPU found");
+        }
+        private void verifyThunderboltBatchIsolation() {
+            if(!net.neoforged.fml.ModList.get().isLoaded("thunderbolt"))return;
+            try {
+                Object owner=certifiedLogic();
+                Class<?> type=Class.forName("com.moakiee.thunderbolt.core.crafting.batch.BatchExecutor");
+                var eligibility=type.getDeclaredMethod("isBatchEligible",IPatternDetails.class);eligibility.setAccessible(true);
+                var pattern=plan.patternTimes().keySet().iterator().next();
+                boolean ordinary=(boolean)eligibility.invoke(null,pattern);
+                com.aecraftroute.addon.compat.CertifiedExecutionScope.run(owner,()->{
+                    try {if((boolean)eligibility.invoke(null,pattern))throw new AssertionError("External batch dispatcher retained ownership");}
+                    catch(ReflectiveOperationException failure){throw new AssertionError(failure);}
+                });
+                if((boolean)eligibility.invoke(null,pattern)!=ordinary)throw new AssertionError("Ordinary batch eligibility changed after scope exit");
+                LOG.info("[SELFTEST] registered batch eligibility isolated; cpu={} ordinaryRestored={}",owner.getClass().getName(),ordinary);
+            } catch(Throwable failure){fail("batch eligibility isolation failed: "+rootCause(failure));}
+        }
+        /** Real production still comes from real providers. Only the estimate is
+         * deliberately wrong; it must not withhold actual goal stock or CPU release. */
+        private void addOverestimatedReturns() {
+            try {
+                Object logic=certifiedLogic();var field=logic.getClass().getDeclaredField("job");field.setAccessible(true);
+                Object nativeJob=field.get(logic);appeng.crafting.inv.ListCraftingInventory waiting;
+                if(nativeJob instanceof com.aecraftroute.addon.mixin.GrowthJobAccessor access)waiting=access.aecraftroute$getWaitingFor();
+                else waiting=((com.aecraftroute.addon.mixin.AdvancedGrowthJobAccessor)nativeJob).aecraftroute$getWaitingFor();
+                waiting.insert(plan.finalOutput().what(),17,Actionable.MODULATE);
+                waiting.insert(AEItemKey.of(Items.STICK),13,Actionable.MODULATE);
+                LOG.info("[SELFTEST] injected overestimated target/byproduct ledger only: targetExtra=17 byproductExtra=13");
+            } catch(Throwable failure){fail("cannot arrange overestimated return test: "+rootCause(failure));}
+        }
+
         // ------------------------------------------------------------ RUN
 
         private void run() {
@@ -869,6 +912,11 @@ public final class SelftestHarness {
             }
 
             if (requester.delivered >= requested) {
+                if(executingCpu!=null && executingCpu.isBusy()) {
+                    if(++completionTicks>100){fail("target delivered but the actual CPU did not release the job");finish();}
+                    return;
+                }
+                LOG.info("[SELFTEST] actual executing CPU released after target delivery");
                 verifyDelivery();
                 return;
             }

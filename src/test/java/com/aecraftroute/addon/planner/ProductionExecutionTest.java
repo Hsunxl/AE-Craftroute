@@ -98,8 +98,7 @@ class ProductionExecutionTest {
 
         /** {@code ProductionCpuMixin.tickCraftingLogic} TAIL delivery gate. */
         long deliver(AEKey target) {
-            if (!job.readyToDeliver(waitingFor.list, target)) return 0;
-            long held = inventory.extract(target, remaining, Actionable.SIMULATE);
+            long held = job.deliverableAmount(inventory.list,target,remaining);
             if (held <= 0) return 0;
             inventory.extract(target, held, Actionable.MODULATE);
             remaining -= held;
@@ -142,12 +141,12 @@ class ProductionExecutionTest {
         var sprout = new BenchPatternDetails(dust, 2, List.of(of(seed, 1)));
         var plan = plan(dust, 4,
                 Map.of(dust, 1L),
-                List.of(block(3, step(variant(grow, new GenericStack(dust, 1)), 1),
+                List.of(block(4, step(variant(grow, new GenericStack(dust, 1)), 1),
                         step(variant(sprout, new GenericStack(seed, 1)), 1))));
         var cpu = new Cpu(plan);
         cpu.inventory.insert(dust, 1, Actionable.MODULATE);   // tryExtractInitialItems
 
-        for (long round = 1; round <= 3; round++) {
+        for (long round = 1; round <= 4; round++) {
             assertTrue(cpu.dispatch(grow), "growth dispatch " + round);
             assertEquals(round - 1, cpu.stock(dust), "each generation spends one dust inside the CPU");
             assertEquals(1, cpu.waitingFor.list.get(seed), "the seed is expected back, not delivered");
@@ -167,7 +166,7 @@ class ProductionExecutionTest {
         assertEquals(4, cpu.deliver(dust), "the grown dust is handed over only at the end");
         assertEquals(Map.of(dust, 4L), cpu.delivered);
         assertEquals(0, cpu.remaining);
-        assertEquals(0, cpu.stock(dust));
+        assertEquals(1, cpu.stock(dust), "the working seed is retained for native return-to-network cleanup");
     }
 
     /** A catalyst is consumed and returned by every firing; one unit must survive the
@@ -289,7 +288,7 @@ class ProductionExecutionTest {
         var grow = new BenchPatternDetails(seed, 1, List.of(of(dust, 1)));
         var sprout = new BenchPatternDetails(dust, 2, List.of(of(seed, 1)));
         var plan = plan(dust, 3, Map.of(dust, 1L),
-                List.of(block(2, step(variant(grow, new GenericStack(dust, 1)), 1),
+                List.of(block(3, step(variant(grow, new GenericStack(dust, 1)), 1),
                         step(variant(sprout, new GenericStack(seed, 1)), 1))));
         var cpu = new Cpu(plan);
         cpu.inventory.insert(dust, 1, Actionable.MODULATE);
@@ -306,7 +305,8 @@ class ProductionExecutionTest {
         assertTrue(cpu.job.done());
         assertTrue(cpu.tasks.isEmpty());
         assertTrue(cpu.job.validateRemainingTasks(cpu.tasks), "completion keeps native tasks empty");
-        assertEquals(3, cpu.stock(dust));
+        assertEquals(4, cpu.stock(dust));
         assertEquals(3, cpu.deliver(dust));
+        assertEquals(1,cpu.stock(dust));
     }
 }

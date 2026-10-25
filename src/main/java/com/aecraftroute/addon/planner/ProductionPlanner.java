@@ -1,7 +1,6 @@
 package com.aecraftroute.addon.planner;
 
 import com.aecraftroute.addon.vm.NumericCraftingVM;
-import com.aecraftroute.addon.vm.NumericProgramCompiler;
 
 import java.math.BigInteger;
 import java.util.*;
@@ -49,6 +48,9 @@ public final class ProductionPlanner<K, R> {
     private final Limits limits;
     private long started, serial;
     private boolean clipped;
+    private CompiledProductionGraph compiled;
+    private boolean dagFastPath;
+    boolean dagFastPathUsed(){return dagFastPath;}
     private final Deque<Node> fair = new ArrayDeque<>();
     private final class Node {
         final BigInteger[] need;
@@ -127,6 +129,40 @@ public final class ProductionPlanner<K, R> {
         // the caller's budget. Cancellation must also propagate from heuristic work.
         return expired() || System.nanoTime()-started>=allowance;
     }
+    private CompiledProductionGraph compiled(long allowance) {
+        if(compiled!=null)return compiled;
+        var indices=new HashMap<K,Integer>();for(int k=0;k<keys.size();k++)indices.put(keys.get(k),k);
+        var in=new int[recipes.size()][];var out=new int[recipes.size()][];
+        var a=new long[recipes.size()][];var b=new long[recipes.size()][];
+        for(int r=0;r<recipes.size();r++) {
+            if(probeExpired(allowance))return null;
+            in[r]=new int[recipes.get(r).inputs.size()];a[r]=new long[in[r].length];int i=0;
+            for(var entry:recipes.get(r).inputs.entrySet()){in[r][i]=indices.get(entry.getKey());a[r][i++]=entry.getValue();}
+            out[r]=new int[recipes.get(r).outputs.size()];b[r]=new long[out[r].length];i=0;
+            for(var entry:recipes.get(r).outputs.entrySet()){out[r][i]=indices.get(entry.getKey());b[r][i++]=entry.getValue();}
+        }
+        compiled=CompiledProductionGraph.compile(keys.size(),in,a,out,b,()->probeExpired(allowance));return compiled;
+    }
+    private Result<K,R> dag(int target,BigInteger[] goal,long increment) {
+        if(limits.states<64)return null;
+        long allowance=Math.min(200_000_000L,limits.nanos/8);
+        var graph=compiled(allowance);if(graph==null)return null;
+        var candidate=DagBatchPlanner.candidate(graph,stock,target,increment,()->probeExpired(allowance));
+        if(candidate==null || probeExpired(allowance))return null;
+        Node witness=new Node(goal,null,null);
+        var steps=candidate.steps();
+        for(int i=steps.size()-1;i>=0;i--) {
+            if(probeExpired(allowance))return null;
+            var step=steps.get(i);witness=new Node(goal,witness,new Block<>(List.of(new Step<>(recipes.get(step.recipe()).id,step.count())),1));
+        }
+        try {
+            // No DAG shortcut may bypass the SAME prefix-capital/forward proof.
+            var result=certify(witness,target,increment,candidate.visited());
+            if(!expired() && result.status==Status.FEASIBLE){dagFastPath=true;return result;}
+        } catch(CancellationException canceled){throw canceled;}
+        catch(IllegalStateException rejected){/* Incomplete heuristic, never a missing-material verdict. */}
+        return null;
+    }
     /** A bounded constructive hint, not a reachability decision or a pruning rule. */
     private Probe probe(int target, BigInteger[] goal, long increment) {
         var result=new Probe();
@@ -140,40 +176,9 @@ public final class ProductionPlanner<K, R> {
         var distances=new int[keys.size()]; Arrays.fill(distances,Integer.MAX_VALUE);
         var recipeDistances=new int[recipes.size()]; Arrays.fill(recipeDistances,Integer.MAX_VALUE);
         var keyOrder=new ArrayList<Integer>();
-        var producers=new ArrayList<List<Integer>>();
-        var keyIndices=new HashMap<K,Integer>();
-        for(int k=0;k<keys.size();k++) {
-            if(probeExpired(allowance)) return result;
-            producers.add(new ArrayList<>()); keyIndices.put(keys.get(k),k);
-        }
-        var inputIndices=new int[recipes.size()][];
-        var outputIndices=new int[recipes.size()][];
-        var numericInputs=new long[recipes.size()][];
-        var numericOutputs=new long[recipes.size()][];
-        for(int r=0;r<recipes.size();r++) {
-            if(probeExpired(allowance)) return result;
-            inputIndices[r]=new int[recipes.get(r).inputs.size()];
-            numericInputs[r]=new long[inputIndices[r].length];
-            int i=0;
-            for(K key:recipes.get(r).inputs.keySet()) {
-                if(probeExpired(allowance)) return result;
-                inputIndices[r][i]=keyIndices.get(key);
-                numericInputs[r][i++]=recipes.get(r).inputs.get(key);
-            }
-            outputIndices[r]=new int[recipes.get(r).outputs.size()]; i=0;
-            numericOutputs[r]=new long[outputIndices[r].length];
-            for(K key:recipes.get(r).outputs.keySet()) {
-                if(probeExpired(allowance)) return result;
-                int k=keyIndices.get(key); outputIndices[r][i]=k;
-                numericOutputs[r][i++]=recipes.get(r).outputs.get(key);
-                producers.get(k).add(r);
-            }
-        }
-        // Compile once within the SAME probe allowance. Only sparse numeric
-        // snapshot data enters this kernel; no keys, patterns or grid escape.
-        var numericProgram=NumericProgramCompiler.compile(keys.size(),inputIndices,numericInputs,
-                outputIndices,numericOutputs,()->probeExpired(allowance));
-        if(numericProgram==null) return result;
+        var graph=compiled(allowance);if(graph==null)return result;
+        var inputIndices=graph.inputKeys;var outputIndices=graph.outputKeys;
+        var producers=graph.producers;var numericProgram=graph.bytecode;
         var pending=new ArrayDeque<Integer>(); pending.add(target); distances[target]=0;
         // Discover topology once, independently of current quantities, including
         // ALL alternative producers. Every relevant input key is visited once.
@@ -181,7 +186,7 @@ public final class ProductionPlanner<K, R> {
             if(probeExpired(allowance)) return result;
             int key=pending.remove();
             keyOrder.add(key);
-            for(int r:producers.get(key)) {
+            for(int r:producers[key]) {
                 if(probeExpired(allowance)) return result;
                 recipeDistances[r]=Math.min(recipeDistances[r],distances[key]);
                 for(int k:inputIndices[r]) {
@@ -216,7 +221,7 @@ public final class ProductionPlanner<K, R> {
                 if(probeExpired(allowance)) return result;
                 var missing=hints[key].subtract(BigInteger.valueOf(actual[key]));
                 if(missing.signum()<=0) continue;
-                for(int r:producers.get(key)) {
+                for(int r:producers[key]) {
                     if(probeExpired(allowance)) return result;
                     var rounds=missing.add(outputs[r][key]).subtract(ONE).divide(outputs[r][key]);
                     for(int k:inputIndices[r]) {
@@ -316,10 +321,11 @@ public final class ProductionPlanner<K, R> {
     }
     public Result<K,R> solve(K target, long increment) {
         if(increment<=0) throw new IllegalArgumentException("Increment must be positive");
-        started=System.nanoTime(); fair.clear(); clipped=false; serial=0;
+        started=System.nanoTime(); fair.clear(); clipped=false; serial=0;dagFastPath=false;
         int targetIndex=keys.indexOf(target);
         if(targetIndex<0) return failure(Status.UNREACHABLE,0);
         var goal=vector(); goal[targetIndex]=stock[targetIndex].add(BigInteger.valueOf(increment));
+        var aggregated=dag(targetIndex,goal,increment);if(aggregated!=null)return aggregated;
         var attempt=probe(targetIndex,goal,increment);
         if(attempt.feasible!=null) return attempt.feasible;
         var queue=new PriorityQueue<Node>(Comparator.comparingDouble((Node n)->n.score).thenComparingLong(n->n.order));

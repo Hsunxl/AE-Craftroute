@@ -6,8 +6,8 @@ import java.util.*;
 import java.util.function.Function;
 import static com.aecraftroute.addon.planner.ProductionPlanningException.Reason.*;
 
-/** Finite network snapshot -> exact transitions -> certified plan. No bytecode cache,
- * chosen-primary-only search, stock correction or native fallback participates. */
+/** Finite snapshot -> fresh exact variants -> cached numeric compilation -> certified
+ * plan. Compiled entries contain no live patterns; the executable binding is always fresh. */
 public final class NetworkProductionPlanner {
     private static final ProductionPlanCache<AEKey> CACHE = new ProductionPlanCache<>();
     public static CertifiedCraftingPlan plan(AEKey target,long increment,
@@ -109,6 +109,8 @@ public final class NetworkProductionPlanner {
     /** Read-only telemetry, also used by development-only real-grid assertions. */
     public static long cacheHits() { return CACHE.stats().hits(); }
     static void clearCache() { CACHE.clear(); }
+    /** Server lifecycle boundary: cached numeric rules and proofs cannot outlive a server. */
+    public static void clearPlanningCaches(){CACHE.clear();CompiledProductionGraph.clear();}
     private static long remaining(long start,ProductionPlanner.Limits limits) {
         if(Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
         long elapsed=System.nanoTime()-start;

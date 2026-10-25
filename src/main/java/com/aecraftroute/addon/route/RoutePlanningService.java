@@ -244,6 +244,6 @@ public final class RoutePlanningService {
     static void cancelJobs(List<Job> jobs) {
         var old=new ArrayList<>(jobs);jobs.clear();for(var j:old)j.result.cancel(true);
     }
-    @SubscribeEvent public static void stopped(ServerStoppedEvent event) {cancelJobs(JOBS);clearReuse();WORKERS.purge();}
+    @SubscribeEvent public static void stopped(ServerStoppedEvent event) {cancelJobs(JOBS);clearReuse();NetworkProductionPlanner.clearPlanningCaches();WORKERS.purge();}
     private RoutePlanningService() {}
 }
