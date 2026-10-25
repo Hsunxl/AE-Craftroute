@@ -80,7 +80,7 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         if(mx>=x && mx<x+18 && my>=y && my<y+18)offerMachines(g,candidates,x,y);
         boolean hover=mx>=x && mx<x+width && my>=y && my<y+18;
         var machine=optionMachine.get(index);
-        if(!hover || machine==null)machine=candidates.isEmpty()?null:candidates.get(RouteMachineCycle.index(ticks,candidates.size(),candidates.indexOf(machine),hover));
+        if(!hover || machine==null)machine=candidates.isEmpty()?null:candidates.get(RouteMachineCycle.index(ticks,candidates,machine,hover));
         if(machine!=null) {optionMachine.put(index,machine);drawTyped(g,machine,x+1,y+1);}
         else {var icon=entry.category().getIcon();if(icon!=null)drawCategoryIcon(g,icon,x+1,y+1);}
         if(index==this.index)g.fill(x+20,y,x+width,y+18,0xFFC6C6D4);
@@ -98,12 +98,18 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     /** Machine icon rotation period in client ticks (60 ticks = about 3 seconds). */
     private static final int MACHINE_ROTATE_TICKS=60;
     public void renderMachine(String id,GuiGraphics g,int x,int y,int mx,int my) {
-        if(RouteEmcRules.isEmc(id)) {renderEmcMachine(g,x,y,mx,my);return;}
+        renderMachineIcon(id,g,x,y,mx,my,true);
+    }
+    public void renderRecipeBadge(String id,GuiGraphics g,int x,int y,int mx,int my) {
+        renderMachineIcon(id,g,x,y,mx,my,false);
+    }
+    private void renderMachineIcon(String id,GuiGraphics g,int x,int y,int mx,int my,boolean trayEnabled) {
+        if(RouteEmcRules.isEmc(id)) {renderEmcMachine(g,x,y,mx,my,trayEnabled);return;}
         var info=treeMachines.get(id);if(info==null) {g.drawString(Minecraft.getInstance().font,"?",x+4,y+4,0x555555,false);return;}
         boolean hover=mx>=x && mx<x+18 && my>=y && my<y+18;
-        if(hover)offerMachines(g,info.candidates,x,y);
+        if(hover && trayEnabled)offerMachines(g,info.candidates,x,y);
         var machine=treeShown.get(id);
-        if(!hover || machine==null)machine=info.candidates.isEmpty()?null:info.candidates.get(RouteMachineCycle.index(ticks,info.candidates.size(),info.candidates.indexOf(machine),hover));
+        if(!hover || machine==null)machine=info.candidates.isEmpty()?null:info.candidates.get(RouteMachineCycle.index(ticks,info.candidates,machine,hover));
         if(machine!=null) {treeShown.put(id,machine);drawTyped(g,machine,x+1,y+1);}
         else if(info.icon!=null)drawCategoryIcon(g,info.icon,x+1,y+1);
         else g.drawString(Minecraft.getInstance().font,"?",x+4,y+4,0x555555,false);
@@ -226,6 +232,41 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     private <T> boolean matchesId(Entry<T> entry,String id) {
         return variants.getOrDefault(entry,List.of(entry)).stream().anyMatch(variant->recipeId(variant).equals(id));
     }
+    public boolean renderPreview(String id,GuiGraphics g,int x,int y,int width,int height,int mx,int my) {
+        if(id==null || RouteEmcRules.isEmc(id) || width<24 || height<24)return false;
+        focusRecipe(id);
+        if(layout==null || index<0 || index>=recipes.size() || !matchesId(recipes.get(index),id))return false;
+        var border=layout.getRectWithBorder();var rect=layout.getRect();
+        float s=Math.min(1.5F,Math.min((width-8F)/Math.max(1,border.getWidth()),(height-8F)/Math.max(1,border.getHeight())));
+        if(!Float.isFinite(s) || s<=0)return false;
+        int ox=x+Math.round((width-border.getWidth()*s)/2),oy=y+Math.round((height-border.getHeight()*s)/2);
+        layout.setPosition(rect.getX()-border.getX(),rect.getY()-border.getY());
+        int rx=(int)((mx-ox)/s),ry=(int)((my-oy)/s);
+        g.enableScissor(x,y,x+width,y+height);
+        g.pose().pushPose();
+        try {
+            g.pose().translate(ox,oy,0);g.pose().scale(s,s,1);
+            layout.drawRecipe(g,rx,ry);
+            if(mx>=x && mx<x+width && my>=y && my<y+height) {
+                layout.getInputHandler().handleMouseMoved(rx,ry);layout.drawOverlays(g,rx,ry);
+            }
+        } finally {g.pose().popPose();g.disableScissor();}
+        return true;
+    }
+    public String previewRecipeId(RouteView.Choice choice,String knownId) {
+        if(knownId!=null)return knownId;
+        // Never choose the first output match. Multiple equivalent categories are ambiguous.
+        if(choice==null || choice.alternatives() || recipes.size()>64)return null;
+        String match=null;
+        for(int i=0;i<recipes.size();i++) {
+            selectIndex(i);
+            if(RouteRecipePreviewMatch.matches(choice,currentDraft())) {
+                if(match!=null)return null;
+                match=recipeId(recipes.get(i));
+            }
+        }
+        return match;
+    }
     private record Entry<T>(IRecipeCategory<T> category,T recipe,IFocusGroup focus) {}
     RouteJeiRecipes(IJeiRuntime runtime) {this.runtime=runtime;}
     public void select(AEKey key) {
@@ -282,15 +323,13 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
             String title=emcSelected()?"EMC 转换":recipes.get(index).category().getTitle().getString();
             button(g,x,y,w-24,"配方 "+(index+1)+" / "+count()+" ▾ "+font.plainSubstrByWidth(title,Math.max(1,w-110)));
             if(ticks-pageChangedAt<30)g.fill(x,y+18,x+w-24,y+20,0xFF3E6B8A);
-            String id=emcSelected()?"ProjectE EMC 转换":recipeId(recipes.get(index));
-            if(mx>=x && mx<x+w-24 && my>=y && my<y+18)g.renderComponentTooltip(font,List.of(Component.literal("当前配方 "+(index+1)+" / "+count()),Component.literal(id),Component.literal("点击打开配方列表；翻页只预览，不替换画布")),mx,my);
         }
         if(emcSelected())renderEmc(g);
         else if(layout==null)g.drawString(font,font.plainSubstrByWidth(error.isEmpty()?"无可展示的 JEI 配方":error,w),x,y+22,0x666666,false);
         else {
             String title=layout.getRecipeCategory().getTitle().getString();
             boolean machineHover=mx>=x+w-20 && mx<x+w-2 && my>=y && my<y+18;
-            if(!machineHover || shownMachine==null)shownMachine=machines.isEmpty()?null:machines.get(RouteMachineCycle.index(ticks,machines.size(),machines.indexOf(shownMachine),machineHover));
+            if(!machineHover || shownMachine==null)shownMachine=machines.isEmpty()?null:machines.get(RouteMachineCycle.index(ticks,machines,shownMachine,machineHover));
             try {drawMachine(g,mx,my,title);}catch(RuntimeException e) {error="JEI 设备图标无法绘制";}
             if(bodyHeight>=24) {
                 var border=layout.getRectWithBorder();var recipeRect=layout.getRect();
@@ -340,11 +379,14 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         emcDevices=List.copyOf(result);return emcDevices;
     }
     private void renderEmcMachine(GuiGraphics g,int x,int y,int mx,int my) {
+        renderEmcMachine(g,x,y,mx,my,true);
+    }
+    private void renderEmcMachine(GuiGraphics g,int x,int y,int mx,int my,boolean trayEnabled) {
         var candidates=emcDevices();if(candidates.isEmpty())return;
         boolean hover=mx>=x && mx<x+18 && my>=y && my<y+18;
-        int selected=RouteMachineCycle.index(ticks,candidates.size(),candidates.indexOf(shownEmcMachine),hover);
+        int selected=RouteMachineCycle.index(ticks,candidates,shownEmcMachine,hover);
         shownEmcMachine=candidates.get(selected);drawTyped(g,shownEmcMachine,x+1,y+1);
-        if(hover)offerMachines(g,candidates,x,y);
+        if(hover && trayEnabled)offerMachines(g,candidates,x,y);
     }
     private void showEmcMachine() {
         if(shownEmcMachine==null && !emcDevices().isEmpty())shownEmcMachine=emcDevices().getFirst();

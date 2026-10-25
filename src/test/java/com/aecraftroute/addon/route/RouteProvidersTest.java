@@ -44,4 +44,23 @@ class RouteProvidersTest {
         node(provider(grid,true,0,0),true);node(provider(null,true,9,0),true);node(new Object(),true);
         assertTrue(RouteProviders.active(grid).isEmpty());
     }
+    @Test void brokenThirdPartyProviderDoesNotEraseOtherMappings() {
+        var broken=proxy(PatternContainer.class,name->{throw new IllegalStateException("third-party unavailable");});
+        var valid=provider(grid,true,9,0);node(broken,true);node(valid,true);
+        assertEquals(List.of(valid),RouteProviders.active(grid));
+    }
+    @Test void brokenSortOrderDoesNotCrashEnumeration() {
+        var inv=proxy(InternalInventory.class,name->name.equals("size")?9:null);
+        var broken=proxy(PatternContainer.class,name->switch(name) {
+            case "getGrid"->grid;case "isVisibleInTerminal"->true;case "getTerminalPatternInventory"->inv;
+            case "getTerminalSortOrder"->throw new IllegalStateException("stale sort key");default->null;
+        });
+        var valid=provider(grid,true,9,0);node(broken,true);node(valid,true);
+        assertEquals(List.of(valid,broken),RouteProviders.active(grid));
+    }
+    @Test void customHostsWithoutVanillaLogicHostCanHaveMissingGroups() {
+        var p=provider(grid,true,9,0);
+        var info=RouteProviderPresentation.of(p);
+        assertNotNull(info.name());assertNull(info.icon());assertEquals("",info.location());
+    }
 }

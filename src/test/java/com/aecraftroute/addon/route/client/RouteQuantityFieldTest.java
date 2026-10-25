@@ -4,6 +4,17 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 class RouteQuantityFieldTest {
+    @Test void onlyFinalProductCanBeEditedByAnyEntryPoint() {
+        assertTrue(RouteQuantityField.editable(true,false));
+        assertFalse(RouteQuantityField.editable(false,false));
+        assertFalse(RouteQuantityField.editable(false,true));
+        assertFalse(RouteQuantityField.editable(true,true));
+    }
+    @Test void readonlyDerivedFieldsNeverQualifyForWheelEditing() {
+        for(boolean ctrl:new boolean[]{false,true})for(boolean horizontal:new boolean[]{false,true})
+            assertFalse(RouteQuantityField.wheelEdits(RouteQuantityField.editable(false,false),ctrl,horizontal,false));
+        assertTrue(RouteQuantityField.wheelEdits(RouteQuantityField.editable(true,false),false,false,false));
+    }
     @Test void independentRowCannotCoverItemIconMachineOrLabels() {
         for(int width:new int[]{86,100,140}) {
             var field=RouteQuantityField.of(0,0,width);var machine=RouteMaterialPort.of(0,0,width);

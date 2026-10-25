@@ -16,6 +16,13 @@ class RoutePatternPresentationTest {
     @Test void refreshedEmptySourcesRemoveStaleOrigin() {
         assertTrue(RoutePatternPresentation.sources(choice("a",List.of(source)),reply(choice("a",List.of()))).isEmpty());
     }
+    @Test void completedReloadWithRemovedPatternCannotKeepStaleProvider() {
+        assertTrue(RoutePatternPresentation.sources(choice("removed",List.of(source)),reply(choice("other",List.of()))).isEmpty());
+    }
+    @Test void truncatedReloadDoesNotClaimPatternWasRemoved() {
+        var partial=new RouteView.Reply("ok",List.of(),null,List.of(),false,0,true);
+        assertEquals(List.of(source),RoutePatternPresentation.sources(choice("a",List.of(source)),partial));
+    }
     @Test void olderPayloadsAndConstructorsHaveAnEmptySourceList() {
         var old=new com.google.gson.Gson().fromJson("{\"id\":\"a\",\"inputs\":[],\"outputs\":[],\"alternatives\":false}",RouteView.Choice.class);
         assertNotNull(old.sources());assertTrue(old.sources().isEmpty());

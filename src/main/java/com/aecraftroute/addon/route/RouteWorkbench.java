@@ -136,18 +136,13 @@ public final class RouteWorkbench {
         }catch(RuntimeException e) {return null;}
     }
     private static RouteProviderFilter.Metadata metadata(PatternContainer provider) {
-        var group=provider.getTerminalGroup();var icon=group.icon();String location="";
-        String name=group.name().getString(),modId=icon==null?"":icon.getModId(),itemId=icon==null?"":icon.getId().toString();
-        if(provider instanceof PatternProviderLogicHost host) {
-            var pos=host.getBlockEntity().getBlockPos();
-            location=pos.getX()+","+pos.getY()+","+pos.getZ()+" / "+pos.getX()+" "+pos.getY()+" "+pos.getZ();
-            // A group can depict the adjacent machine; retain the actual provider's identity too.
-            var providerIcon=host.getTerminalIcon();
-            if(providerIcon!=null) {
-                name+=" "+providerIcon.getDisplayName().getString();modId+=" "+providerIcon.getModId();itemId+=" "+providerIcon.getId();
-            }
+        var info=RouteProviderPresentation.of(provider);var icon=info.icon();
+        String name=info.name(),modId=icon==null?"":icon.getModId(),itemId=icon==null?"":icon.getId().toString();
+        var own=info.providerIcon();
+        if(own!=null) {
+            name+=" "+own.getDisplayName().getString();modId+=" "+own.getModId();itemId+=" "+own.getId();
         }
-        return new RouteProviderFilter.Metadata(name,modId,itemId,location);
+        return new RouteProviderFilter.Metadata(name,modId,itemId,info.location());
     }
     public static State view(ServerPlayer player,AEBaseMenu menu,IGrid grid,ViewRequest request,String message) {
         if(request==null)request=ViewRequest.first();
@@ -163,7 +158,7 @@ public final class RouteWorkbench {
         int slotPage=slotPages==0?0:Math.min(requestedSlotPage,slotPages-1);
         var rows=new ArrayList<Provider>();
         for(var provider:shown) {
-            var inv=provider.getTerminalPatternInventory();var group=provider.getTerminalGroup();
+            var inv=provider.getTerminalPatternInventory();var info=RouteProviderPresentation.of(provider);
             var window=RouteProviderWindow.of(inv.size(),request.columns(),request.rows(),slotPage);
             int slotStart=window.first();
             var slots=new ArrayList<ProviderSlot>();
@@ -171,8 +166,8 @@ public final class RouteWorkbench {
                 var item=inv.getStackInSlot(i);slots.add(new ProviderSlot(i,icon(player,item),item.isEmpty()?"空槽":output(player,item),product(player,item)));
             }
             int occupied=0;for(int i=0;i<inv.size();i++)if(!inv.getStackInSlot(i).isEmpty())occupied++;
-            rows.add(new Provider(session.ids.get(provider),group.name().getString(),group.icon()==null?null:
-                    RouteView.Stack.of(group.icon(),1,player.registryAccess()),inv.size(),slotStart,List.copyOf(slots),occupied));
+            rows.add(new Provider(session.ids.get(provider),info.name(),info.icon()==null?null:
+                    RouteView.Stack.of(info.icon(),1,player.registryAccess()),inv.size(),slotStart,List.copyOf(slots),occupied));
         }
         var cache=cache(player);var cached=new ArrayList<CacheSlot>();
         for(int i=0;i<CACHE_SIZE;i++)if(cache.contains(Integer.toString(i))) {

@@ -31,6 +31,10 @@ public interface RouteRecipeBrowser {
     default java.util.List<net.minecraft.network.chat.Component> machineTooltip(String recipeId) {return java.util.List.of();}
     default void showMachine(String recipeId) {}
     default void focusRecipe(String id) {}
+    /** Read-only exact recipe preview; never falls back to another recipe for the same output. */
+    default boolean renderPreview(String id,GuiGraphics graphics,int x,int y,int width,int height,int mx,int my) {return false;}
+    default String previewRecipeId(RouteView.Choice choice,String knownId) {return knownId;}
+    default void renderRecipeBadge(String id,GuiGraphics graphics,int x,int y,int mx,int my) {renderMachine(id,graphics,x,y,-1000000,-1000000);}
     default boolean scroll(double x,double y,double sx,double sy) {return false;}
     default boolean drag(double x,double y,int button,double dx,double dy) {return false;}
     default boolean key(int key,int scan) {return false;}

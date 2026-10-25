@@ -56,7 +56,10 @@ public final class RouteScreen extends Screen {
     private final boolean canModify;
     private RouteWorkbenchPanel workbench;
     private int workbenchTicks,lastWorkbenchSequence;
-    private boolean nativeRecipeVisible() {return jeiTab && browser!=null && (selectedRecipe==null || selectedRecipe.draft);}
+    private boolean narrowInspector;
+    private boolean narrow() {return windowBounds().width()<320;}
+    private boolean workbenchVisible() {return !narrow() || narrowInspector;}
+    private boolean nativeRecipeVisible() {return (!narrow() || narrowInspector) && jeiTab && browser!=null && (selectedRecipe==null || selectedRecipe.draft);}
     private String encodingLabel(MNode node) {
         var value=nativeRecipeVisible()?browser.currentDraft():branchDrafts.get(node.path);
         if(RouteEmcRules.isEmc(value))return "EMC 路线（无需样板）";
@@ -72,7 +75,13 @@ public final class RouteScreen extends Screen {
         }
         armedEncoding=null;send("encode",node.material.renderKey,RouteNetwork.GSON.toJson(value));
     }
-    private RouteLayout uiLayout() {return RouteLayout.of(width,height);}
+    public RouteWindow windowBounds() {
+        var mc=Minecraft.getInstance();
+        int sw=width>0?width:mc.getWindow().getGuiScaledWidth();
+        int sh=height>0?height:mc.getWindow().getGuiScaledHeight();
+        return RouteWindow.of(sw,sh);
+    }
+    private RouteLayout uiLayout() {return windowBounds().layout();}
     private boolean compact() {return uiLayout().compact();}
     private boolean usable() {return uiLayout().usable();}
     private int inspectorBottom() {return workbench==null?canvasBottom:workbench.top()-5;}
@@ -90,13 +99,12 @@ public final class RouteScreen extends Screen {
     private boolean jeiTab = true;
     private boolean initialized;
     private RouteRecipeBrowser browser;
+    private final RouteRecipeHover recipeHover=new RouteRecipeHover();
     private final Map<String, RouteView.Choice> branches = new LinkedHashMap<>();
     private final Map<String,String> appliedPathChoices=new LinkedHashMap<>();
     private final Map<String, RouteView.Draft> branchDrafts = new LinkedHashMap<>();
     private final Deque<EditState> undo = new ArrayDeque<>();
     private final RouteBranchEdits branchEdits=new RouteBranchEdits();
-    /** Local-only quantity overrides keyed by node path. Never sent to the server, never in RouteBranchEdits. */
-    private final Map<String, Long> quantities = new LinkedHashMap<>();
     private String quantityPath;
     private String quantityText = "";
     private boolean quantityFresh;
@@ -108,7 +116,7 @@ public final class RouteScreen extends Screen {
     private MNode nodeMenuTarget;
     private long ticks;
     private void openNodeMenu(MNode node,double mx,double my,boolean recipes) {
-        nativeMachines.clearOverlay();if(browser!=null)browser.clearMachineOverlay();
+        if(browser!=null)browser.clearMachineOverlay();
         if(itemId!=null)itemId.setFocused(false);cancelQuantity();
         selectedNode=node;selectedKey=node.material.key;selectedRecipe=null;jeiTab=true;
         if(browser!=null)browser.select(node.material.renderKey);
@@ -123,7 +131,7 @@ public final class RouteScreen extends Screen {
         checkpoint();nodeMenu=false;nodeMenuTarget=null;
         if(wholeNode && node==root) {
             target=null;targetAmount=0;targetKeyId=null;source="手动";path="";
-            branchEdits.clear();branches.clear();branchDrafts.clear();quantities.clear();draft=null;draftChoice=null;
+            branchEdits.clear();branches.clear();branchDrafts.clear();draft=null;draftChoice=null;
             materials.clear();offsets.clear();pending.clear();
             selectedNode=null;selectedRecipe=null;selectedKey=null;
             setFieldText("");
@@ -144,7 +152,6 @@ public final class RouteScreen extends Screen {
         } else branchEdits.collapse(node.path);
         branches.keySet().removeIf(p->p.equals(node.path)||p.startsWith(node.path+"/"));
         branchDrafts.keySet().removeIf(p->p.equals(node.path)||p.startsWith(node.path+"/"));
-        quantities.keySet().removeIf(p->p.equals(node.path)||p.startsWith(node.path+"/"));
         rebuildGraph();status=wholeNode && node!=root?"已移除节点及其下级；原配方完整材料不变，可撤销":"已移除下级分支，保留物品节点";
     }
     private void drawNodeMenu(GuiGraphics g,int mx,int my) {
@@ -153,7 +160,7 @@ public final class RouteScreen extends Screen {
         if(current==null || !current.material.key.equals(nodeMenuTarget.material.key)) {nodeMenu=false;return;}
         nodeMenuTarget=current;
         var entries=RouteNodeMenu.entries(nodeMenuSection,new RouteNodeMenu.Context(branchEdits.expanded(current.path),
-                current.recipe!=null,current==root,current.cycle,quantities.containsKey(current.path)));
+                current.recipe!=null,current==root,current.cycle,false));
         var options=browser==null?List.<RouteRecipeBrowser.Option>of():browser.options();
         int capacity=nodeMenuCapacity();
         var page=RoutePopupPage.of(options.size(),capacity,nodeMenuPage);
@@ -197,10 +204,7 @@ public final class RouteScreen extends Screen {
         if(nodeMenuRecipes) {menuSection(recipeReturnSection);return;}
         if(nodeMenuSection!=RouteNodeMenu.Page.ROOT)menuSection(RouteNodeMenu.parent(nodeMenuSection));else nodeMenu=false;
     }
-    private void resetMenuQuantity() {
-        var node=nodeMenuTarget;if(node==null || node==root || node.cycle || !quantities.containsKey(node.path))return;
-        checkpoint();quantities.remove(node.path);cancelQuantity();nodeMenu=false;rebuildGraph();status="已恢复派生数量";
-    }
+
     private void runNodeMenu(RouteNodeMenu.Action action) {
         var current=nodeMenuTarget==null?null:findByPath(nodeMenuTarget.path);
         if(current==null || !current.material.key.equals(nodeMenuTarget.material.key)) {nodeMenu=false;return;}
@@ -211,7 +215,7 @@ public final class RouteScreen extends Screen {
             case HELP -> menuSection(RouteNodeMenu.Page.HELP);case BACK -> backNodeMenu();case TOGGLE -> toggleBranch();
             case RECIPES -> {recipeReturnSection=nodeMenuSection;nodeMenuRecipes=true;nodeMenuPage=0;nodeMenuHits.clear();}
             case STOCK -> {nodeMenu=false;stockSelected();}case AUTO -> {nodeMenu=false;automaticSelected();}
-            case EDIT -> {nodeMenu=false;startQuantityEdit(nodeMenuTarget);}case RESET -> resetMenuQuantity();
+            case EDIT -> {nodeMenu=false;startQuantityEdit(nodeMenuTarget);}case RESET -> {}
             case CLEAR -> removeBranch(nodeMenuTarget,false);case DELETE -> removeBranch(nodeMenuTarget,true);case NONE -> {}
         }
     }
@@ -228,7 +232,7 @@ public final class RouteScreen extends Screen {
     private void dropRecipeIngredient(RouteView.Draft value,AEKey ingredient,double mx,double my) {
         LOGGER.info("Route canvas ingredient drop: recipe={}, ingredient={}, parent={}",value.recipeId(),ingredient.getDisplayName().getString(),activeMaterial()==null?"none":activeMaterial().material.name);
         if(!inside(mx,my,canvasLeft,canvasTop,canvasWidth(),canvasBottom-canvasTop)
-                || workbench!=null && workbench.contains(mx,my)) {status="拖入画布空白处或目标物品节点，才会创建材料分支";return;}
+                || workbenchVisible() && workbench!=null && workbench.contains(mx,my)) {status="拖入画布空白处或目标物品节点，才会创建材料分支";return;}
         var node=activeMaterial();var hit=materialAt(mx,my);
         var choice=draftChoice(value);
         if(hit!=null && RouteGraphMath.outputAmount(choice,hit.material.key)>0)node=hit;
@@ -260,8 +264,7 @@ public final class RouteScreen extends Screen {
     }
     private record EditState(AEKey target, long amount, boolean manual,
                              Map<String, RouteView.Choice> branches, Map<String, RouteView.Draft> drafts,
-                             RouteBranchEdits.Snapshot edits, Map<String, int[]> offsets,
-                             Map<String, Long> quantities) {}
+                             RouteBranchEdits.Snapshot edits, Map<String, int[]> offsets) {}
     /** Copy node offsets so undo restores the layout and later drags cannot mutate a snapshot. */
     private Map<String, int[]> copyOffsets() {
         var copy = new HashMap<String, int[]>();
@@ -270,8 +273,7 @@ public final class RouteScreen extends Screen {
     }
     private EditState captureState() {
         return new EditState(target, targetAmount, manualBuild, new LinkedHashMap<>(branches),
-                new LinkedHashMap<>(branchDrafts), branchEdits.snapshot(), copyOffsets(),
-                new LinkedHashMap<>(quantities));
+                new LinkedHashMap<>(branchDrafts), branchEdits.snapshot(), copyOffsets());
     }
     private void pushUndo(EditState state) {
         if (state == null) return;
@@ -285,18 +287,19 @@ public final class RouteScreen extends Screen {
         target=state.target; targetAmount=state.amount; targetKeyId=keyId(target); manualBuild=state.manual;
         branches.clear(); branches.putAll(state.branches); branchDrafts.clear(); branchDrafts.putAll(state.drafts);
         offsets.clear(); state.offsets.forEach((path, offset) -> offsets.put(path, offset.clone()));
-        quantities.clear(); quantities.putAll(state.quantities);
+        cancelQuantity();
         selectedNode=null; selectedRecipe=null; setFieldText(targetName(target)); rebuildGraph(); status="已退回上一步（仅画布，不回收已生成的样板）";
     }
     private void startQuantityEdit(MNode node) {
-        if (node.cycle) { status = "回料引用节点不能覆盖数量"; return; }
+        if (!quantityEditable(node)) { status = "仅最终产物可修改数量；其余材料由配方自动推导"; return; }
         if(itemId!=null)itemId.setFocused(false);
         quantityPath = node.path;
         quantityText = String.valueOf(node.demand);
         quantityFresh = true;
         selectedNode = node; selectedKey = node.material.key; selectedRecipe = null;
-        status = "输入或滚轮调整数量：Enter 应用，空内容 Enter 恢复自动，Esc 取消；Shift 滚轮单个调整";
+        status = "输入或滚轮调整最终产物数量：Enter 应用，Esc 取消；Shift 滚轮单个调整";
     }
+    private boolean quantityEditable(MNode node) {return node!=null && RouteQuantityField.editable(node==root,node.cycle);}
     private void cancelQuantity() { quantityPath = null; quantityText = ""; quantityFresh = false; }
     private void commitQuantity() {
         String path = quantityPath, text = quantityText;
@@ -304,21 +307,14 @@ public final class RouteScreen extends Screen {
         cancelQuantity();
         MNode node = path == null ? null : findByPath(path);
         if (node == null) { status = "节点已变化，数量未修改"; return; }
-        if (node.cycle) { status = "回料引用节点不能覆盖数量"; return; }
+        if (!quantityEditable(node)) { status = "仅最终产物可修改数量"; return; }
         if (fresh) { status = "数量未修改"; return; }
         Long value = RouteGraphMath.parseDemand(text);
-        if (node.depth == 0) {
-            if (value == null) { status = "最终产物数量不能留空"; return; }
-            checkpoint(); targetAmount = value; rebuildGraph(); status = "已修改最终产物数量";
-            return;
-        }
-        checkpoint();
-        if (value == null) quantities.remove(path); else quantities.put(path, value);
-        rebuildGraph();
-        status = value == null ? "已恢复自动数量" : "已本地覆盖数量；下游按此重算，上游批数未变，未经服务端校验";
+        if (value == null) { status = "最终产物数量不能留空"; return; }
+        checkpoint(); targetAmount = value; rebuildGraph(); status = "已修改最终产物数量";
     }
     private void adjustQuantity(MNode node, int direction, boolean fine) {
-        if (node.cycle) { status = "回料引用节点不能调整数量"; return; }
+        if (!quantityEditable(node)) { status = "仅最终产物可修改数量"; return; }
         long output = node.recipe == null ? 0 : RouteGraphMath.outputAmount(node.recipe.choice, node.material.key);
         if(node.path.equals(quantityPath)) {
             quantityText=RouteQuantityField.stepText(quantityText,node.demand,output,direction,fine);quantityFresh=false;
@@ -327,14 +323,14 @@ public final class RouteScreen extends Screen {
         long next = RouteGraphMath.stepDemand(node.demand, output, direction, fine);
         if (next == node.demand) return;
         checkpoint();
-        if (node.depth == 0) targetAmount = next; else quantities.put(node.path, next);
+        targetAmount = next;
         selectedNode = node; selectedKey = node.material.key; selectedRecipe = null;
         rebuildGraph();
-        status = node.depth == 0 ? "已调整最终产物数量" : "已本地覆盖数量；下游按此重算，上游批数未变，未经服务端校验";
+        status = "已调整最终产物数量";
     }
     private void clearManual() {
         checkpoint(); branchEdits.clear();nodeMenu=false;manualBuild=true; branches.clear(); branchDrafts.clear(); draftChoice=null; draft=null;
-        offsets.clear(); quantities.clear(); selectedNode=null; selectedRecipe=null; rebuildGraph(); status="已清空分支，保留最终产物起点";
+        offsets.clear();  selectedNode=null; selectedRecipe=null; rebuildGraph(); status="已清空分支，保留最终产物起点";
     }
     /** Restore the automatic tree layout without touching selected recipes or materials. */
     private void autoArrange() {
@@ -346,8 +342,8 @@ public final class RouteScreen extends Screen {
         status="已自动整理：清除手动挪动的位置，按树形重新排列并适配窗口（配方与材料不变）";
     }
     private void restoreTree() { send("restore",null,""); }
-    public int contentRight() { return width <= 0 || height <= 0 ? 320 : uiLayout().contentRight(); }
-    public void showRecipes(AEKey key) { jeiTab=true; if(browser!=null)browser.select(key); }
+    public int contentRight() { return uiLayout().contentRight(); }
+    public void showRecipes(AEKey key) { if(narrow()){narrowInspector=true;buildWidgets();}jeiTab=true; if(browser!=null)browser.select(key); }
     public void expandDraft(RouteView.Draft value) {
         var node=activeMaterial();
         if(node==null) { setTarget(value.outputs().get(0).decode(Minecraft.getInstance().level.registryAccess()),1,"JEI",""); node=root; }
@@ -459,6 +455,7 @@ public final class RouteScreen extends Screen {
 
     @Override
     protected void init() {
+        recipeHover.clear();
         layout();
         if(workbench==null)workbench=new RouteWorkbenchPanel((action,argument)->send(action,null,argument)!=0);
         workbench.layout(panelLeft+6,panelRight-panelLeft-14,canvasBottom,canvasLeft,canvasWidth(),canvasTop,compact(),uiLayout().collapseCache());
@@ -520,19 +517,21 @@ public final class RouteScreen extends Screen {
     private void buildWidgets() {
         clearWidgets();
         if (!usable()) {
-            addRenderableWidget(new AeButton(12, Math.max(52, height - 40), 80, 20,
+            addRenderableWidget(new AeButton(windowBounds().left()+12, windowBounds().bottom()-40, 80, 20,
                     Component.literal("返回"), b -> onClose(), false));
             return;
         }
-        int modeX=compact()?54:104;
-        var modify=new AeButton(modeX,3,36,16,Component.literal("修改"),b->switchMode(true),fromCrafting);
+        int modeX=windowBounds().left()+(narrow()?8:compact()?54:104);
+        var modify=new AeButton(modeX,windowBounds().top()+3,36,16,Component.literal("修改"),b->switchMode(true),fromCrafting);
         modify.active=canModify;addRenderableWidget(modify);
-        addRenderableWidget(new AeButton(modeX+40,3,36,16,Component.literal("新建"),b->switchMode(false),!fromCrafting));
+        addRenderableWidget(new AeButton(modeX+40,windowBounds().top()+3,36,16,Component.literal("新建"),b->switchMode(false),!fromCrafting));
+        if(narrow())addRenderableWidget(new AeButton(modeX+80,windowBounds().top()+3,Math.max(40,windowBounds().width()-96),16,
+                Component.literal(narrowInspector?"返回画布":"配方 / 缓存"),b->{narrowInspector=!narrowInspector;nodeMenu=false;if(browser!=null)browser.clearMachineOverlay();buildWidgets();},narrowInspector));
         buildToolbar();
 
-        int fieldW = compact()?Math.max(54,Math.min(120,contentRight()-188)):Math.min(180, Math.max(92, contentRight() / 5));
+        int fieldW = narrow()?windowBounds().width()-60:compact()?Math.max(54,Math.min(120,windowBounds().width()-188)):Math.min(180, Math.max(92, windowBounds().width() / 5));
         int fieldX = contentRight() - 8 - (compact()?38:48) - fieldW;
-        int fieldY=compact()?3:22;
+        int fieldY=windowBounds().top()+(narrow()?24:compact()?3:22);
         itemId = new EditBox(font, fieldX, fieldY, fieldW, 18, Component.literal("物品名称"));
         itemId.setMaxLength(256);
         itemId.setValue(target == null ? "" : targetName(target));
@@ -541,24 +540,41 @@ public final class RouteScreen extends Screen {
                 ? "流体目标请从合成树或 JEI 打开" : "中文名，或 ae2:... 物品代码"));
         itemId.setResponder(this::onSearchChanged);
         addRenderableWidget(itemId);
-        addRenderableWidget(new AeButton(contentRight() - (compact()?42:52), compact()?3:21,
+        addRenderableWidget(new AeButton(contentRight() - (compact()?42:52), windowBounds().top()+(narrow()?24:compact()?3:21),
                 compact()?34:44, 19, Component.literal(compact()?"目标":"设为目标"), b -> setTargetFromField(), false));
     }
 
     private void buildToolbar() {
-        String[] labels=fromCrafting?new String[]{"还原","撤销","清空","整理","应用","自动","库存","适应"}
-                :new String[]{"撤销","清空","整理","应用","自动","库存","适应"};
+        String[] labels=fromCrafting?new String[]{"还原","撤销","清空","整理","应用","自动","库存","适应","重载"}
+                :new String[]{"撤销","清空","整理","应用","自动","库存","适应","重载"};
         String[] tips={"还原合成树","撤销上一次画布编辑","清空手动分支，保留最终产物","自动整理（Home）：清除手动位置并适应窗口",
-                "整幅应用到合成","恢复自动路由","仅用现有库存：不再自动选配方，缺料即不可合成","适应窗口：保留手动位置"};
+                "整幅应用到合成","恢复自动路由","仅用现有库存：不再自动选配方，缺料即不可合成","适应窗口：保留手动位置","重载网络样板来源、AE 系列供应器及 JEI 配方映射；保留画布"};
         Runnable[] actions={this::restoreTree,this::undoEdit,this::clearManual,this::autoArrange,this::applyCanvas,
-                this::automaticSelected,this::stockSelected,this::fitView};
-        var cells=RouteToolbar.of(contentRight()-16,labels.length);
+                this::automaticSelected,this::stockSelected,this::fitView,this::reloadMappings};
+        var cells=RouteToolbar.of(windowBounds().width()-16,labels.length);
         for(int i=0;i<labels.length;i++) {
             int action=i+(fromCrafting?0:1);
-            addToolbarButton(labels[i],8+i*cells.cellWidth(),cells.buttonWidth(),tips[action],actions[action]);
+            addToolbarButton(labels[i],windowBounds().left()+8+i*cells.cellWidth(),cells.buttonWidth(),tips[action],actions[action]);
         }
     }
     private void fitView() { fitPending=true;rebuildGraph(); }
+    private void reloadMappings() {
+        nodeMenu=false;recipeHover.clear();if(browser!=null)browser.clearMachineOverlay();
+        pending.entrySet().removeIf(e->e.getValue().action.equals("query"));
+        for(var material:materials.values()) {material.reply=null;material.loading=false;material.error=null;}
+        queryCount=0;
+        try {
+            if(RouteClient.recipeBrowser!=null) {
+                var fresh=RouteClient.recipeBrowser.get();var node=activeMaterial();
+                if(node!=null)fresh.select(node.material.renderKey);
+                if(selectedRecipe!=null && recipeMachineId(selectedRecipe)!=null)fresh.focusRecipe(recipeMachineId(selectedRecipe));
+                browser=fresh;
+            }
+        } catch(RuntimeException e) {LOGGER.warn("JEI mapping reload failed",e);}
+        if(target!=null)query(target);
+        if(workbench!=null)workbench.refresh();
+        rebuildGraph();status="已请求重载样板与供应器映射；回包后更新，保留画布";
+    }
     private void toggleBranch() {
         var node=nodeMenuTarget;if(node==null)return;
         checkpoint();nodeMenu=false;
@@ -658,7 +674,7 @@ public final class RouteScreen extends Screen {
         selectedKey = targetKeyId;
         selectedNode = null;
         selectedRecipe = null;
-        branchEdits.clear();nodeMenu=false;branches.clear(); branchDrafts.clear(); quantities.clear(); manualBuild=true; draftChoice=null; draft=null;
+        branchEdits.clear();nodeMenu=false;branches.clear(); branchDrafts.clear();  manualBuild=true; draftChoice=null; draft=null;
         materials.clear();
         offsets.clear();
         pending.clear();
@@ -959,7 +975,7 @@ public final class RouteScreen extends Screen {
         json.add("nodes", nodes);
         status = "正在证明强制画布：" + nodes.size() + " 个路径分支（每分支至少执行画布批次）"
                 + (skipped > 0 ? "（" + skipped + " 个节点没有可应用样板）" : "")
-                + (quantities.isEmpty()?"":"；本地材料数量覆盖不提交，服务端按最终目标量重算");
+               ;
         send("apply", target, json.toString());
     }
 
@@ -1080,7 +1096,6 @@ public final class RouteScreen extends Screen {
             return null;
         }
         boolean cyc = ancestors.contains(material.key);
-        if (!cyc) demand = RouteGraphMath.applyOverride(demand, quantities.get(path));
         MNode node = new MNode(path, material, demand, depth);
         materialNodes.add(node);
         var custom=branches.get(path);
@@ -1257,15 +1272,15 @@ public final class RouteScreen extends Screen {
     public void renderBackground(GuiGraphics g, int mx, int my, float dt) {
         // Keep the NeoForge BackgroundRendered hook alive: JEI draws its own list background there.
         super.renderBackground(g,mx,my,dt);
-        appeng.client.gui.style.BackgroundGenerator.draw(contentRight(),height,g,0,0);
+        appeng.client.gui.style.BackgroundGenerator.draw(windowBounds().width(),windowBounds().height(),g,windowBounds().left(),windowBounds().top());
         if (!usable()) return;
         g.fill(canvasLeft-2,canvasTop-2,canvasRight+2,canvasBottom+2,CANVAS_EDGE);
         g.fill(canvasLeft,canvasTop,canvasRight,canvasBottom,CANVAS_BG);
         for(int gx=canvasLeft+8;gx<canvasRight;gx+=16)
             for(int gy=canvasTop+24;gy<canvasBottom;gy+=16)
                 g.fill(gx,gy,gx+1,gy+1,CANVAS_GRID);
-        appeng.client.gui.style.BackgroundGenerator.draw(panelRight-panelLeft+4,canvasBottom-canvasTop+4,g,panelLeft-2,canvasTop-2);
-        frame(g,panelLeft-2,canvasTop-2,panelW+4,canvasBottom-canvasTop+4,CANVAS_EDGE);
+        if(!narrow() || narrowInspector)appeng.client.gui.style.BackgroundGenerator.draw(panelRight-panelLeft+4,canvasBottom-canvasTop+4,g,panelLeft-2,canvasTop-2);
+        if(!narrow() || narrowInspector)frame(g,panelLeft-2,canvasTop-2,panelW+4,canvasBottom-canvasTop+4,CANVAS_EDGE);
     }
 
     @Override
@@ -1275,55 +1290,59 @@ public final class RouteScreen extends Screen {
         // i.e. above this content, so the right-hand strip stays a real JEI panel.
         super.render(g,mx,my,dt);
         if (!usable()) {
-            text(g,"游戏窗口过小",14,28,width-28,GOLD);
-            text(g,"请扩大窗口；当前逻辑尺寸 "+width+" × "+height,14,42,width-28,TEXT);
+            text(g,"终端窗口过小",windowBounds().left()+14,windowBounds().top()+28,windowBounds().width()-28,GOLD);
+            text(g,"请调大 AE 终端尺寸后重开画布",windowBounds().left()+14,windowBounds().top()+42,windowBounds().width()-28,TEXT);
             return;
         }
         drawHeader(g);
-        drawCanvas(g, mx, my);
-        drawInspector(g, mx, my);
+        if(!narrow() || !narrowInspector)drawCanvas(g,mx,my);
+        if(!narrow() || narrowInspector)drawInspector(g,mx,my);else {choiceHits.clear();actionHits.clear();}
         g.flush();g.pose().pushPose();g.pose().translate(0,0,600);
-        workbench.render(g,mx,my);
+        if(workbenchVisible())workbench.render(g,mx,my);
         g.flush();g.pose().popPose();
         drawFooter(g);
         if(browser!=null && browser.draggingIngredient()) {wireX=mx;wireY=my;}
         drawWire(g);
         drawSuggestions(g, mx, my);
         drawNodeTooltip(g,mx,my);
-        workbench.renderDrag(g);
+        if(workbenchVisible())workbench.renderDrag(g);
         drawNodeMenu(g,mx,my);
-        if(browser!=null) {browser.renderDrag(g);browser.renderMachineOverlay(g,mx,my);}
-        nativeMachines.renderOverlay(g,mx,my);
+        if(browser!=null) {
+            browser.renderDrag(g);
+            if(recipeHover.visible())browser.clearMachineOverlay();else browser.renderMachineOverlay(g,mx,my);
+        }
     }
 
     private void drawHeader(GuiGraphics g) {
-        text(g,compact()?"合成树":"合成树画布",compact()?8:10,7,compact()?44:88,TEXT);
+        if(narrow())return;
+        int left=windowBounds().left(),top=windowBounds().top();
+        text(g,compact()?"合成树":"合成树画布",left+(compact()?8:10),top+7,compact()?44:88,TEXT);
         if(compact())return;
         String exit = "Esc 返回";
-        text(g, exit, contentRight() - 10 - font.width(exit), 7, font.width(exit) + 2, FAINT);
+        text(g, exit, contentRight() - 10 - font.width(exit), top+7, font.width(exit) + 2, FAINT);
         if (target == null) {
-            text(g, "未设置生产目标", 12, 26, width - 40, GOLD);
-            text(g, "输入物品的中文名或物品代码，也可以从合成树节点按 F8，或把 JEI 里的物品拖进来", 12, 37,
-                    Math.max(80, (itemId == null ? width : itemId.getX()) - 52), MUTED);
+            text(g, "未设置生产目标", left+12, top+26, windowBounds().width()-40, GOLD);
+            text(g, "输入物品的中文名或物品代码，也可以从合成树节点按 F8，或把 JEI 里的物品拖进来", left+12, top+37,
+                    Math.max(1, (itemId == null ? contentRight() : itemId.getX()) - left - 52), MUTED);
             if (itemId != null) {
-                g.fill(itemId.getX() - 20, 23, itemId.getX() - 4, 39, 0xFFB8B8B8);
-                frame(g, itemId.getX() - 20, 23, 16, 16, BORDER);
-                text(g, "?", itemId.getX() - 15, 27, 12, MUTED);
+                g.fill(itemId.getX() - 20, top+23, itemId.getX() - 4, top+39, 0xFFB8B8B8);
+                frame(g, itemId.getX() - 20, top+23, 16, 16, BORDER);
+                text(g, "?", itemId.getX() - 15, top+27, 12, MUTED);
             }
             return;
         }
-        icon(g, target, 14, 26);
-        int textX = 34;
-        int max = Math.max(70, (itemId == null ? width - 120 : itemId.getX()) - 62);
+        icon(g, target, left+14, top+26);
+        int textX = left+34;
+        int max = Math.max(1, (itemId == null ? contentRight() - 120 : itemId.getX()) - left - 62);
         String goal = "目标  " + target.getDisplayName().getString();
-        text(g, goal, textX, 24, max, GOLD);
+        text(g, goal, textX, top+24, max, GOLD);
         String amount = targetAmount > 0 ? RouteGraphMath.format(targetAmount) : "未指定";
         String amountLabel = source != null && source.startsWith("JEI") ? "单次产出" : "需求";
         String line = amountLabel + " " + amount + "  ·  来源 " + source;
         if (!path.isBlank()) line += "  ·  " + path;
-        text(g, line, textX, 35, max, MUTED);
+        text(g, line, textX, top+35, max, MUTED);
         if (itemId != null && target instanceof AEItemKey) {
-            icon(g, target, itemId.getX() - 20, 23);
+            icon(g, target, itemId.getX() - 20, top+23);
         }
     }
 
@@ -1404,9 +1423,9 @@ public final class RouteScreen extends Screen {
         int x=node.x,y=node.y;
         boolean selected=selectedNode==node && selectedRecipe==null;
         boolean hover=inside(mx,my,sx,sy,sw,sh);
-        boolean overridden=quantities.containsKey(node.path);
-        var visual=RouteNodeVisual.of(plan!=null && plan.proven(),node.material.reply!=null && node.material.reply.stockOnly(),!quantities.isEmpty() || !branches.isEmpty());
-        int border=node.cycle?ACCENT:selected?ACCENT:overridden?AMBER:visual.frame();
+
+        var visual=RouteNodeVisual.of(plan!=null && plan.proven(),node.material.reply!=null && node.material.reply.stockOnly(),!branches.isEmpty());
+        int border=node.cycle?ACCENT:selected?ACCENT:visual.frame();
         g.fill(x,y,x+node.w,y+node.h,selected?0xFFC6C6D4:hover?0xFFD8D9E0:0xFFCBCCD4);
         bevel(g,x,y,node.w,node.h); frame(g,x,y,node.w,node.h,border);
         int slotX=x+(node.w-28)/2,slotY=y+4;
@@ -1439,13 +1458,13 @@ public final class RouteScreen extends Screen {
         String proof=plan==null?null:plan.proven()?"网络计划已证明；不表示本地编辑已应用":"网络计划："+plan.message();
         var details=new RouteNodeStatus.Details(node.material.name,node.demand,node.cycle,node.recipe!=null,branchEdits.expanded(node.path),
                 (int)node.children.stream().filter(child->!child.inlineResource).count(),proof,provenStartup(node.material.renderKey),
-                !quantities.isEmpty()||!branches.isEmpty(),emcCostLabel(node),node.recipeError);
+                !branches.isEmpty(),emcCostLabel(node),node.recipeError);
         g.renderComponentTooltip(font,RouteNodeStatus.details(details).stream().map(Component::literal).map(c->(Component)c).toList(),mx,my);
     }
 
     private void drawQuantityField(GuiGraphics g,MNode node,int mx,int my,RouteNodeVisual visual) {
         var field=RouteQuantityField.of(node.x,node.y,node.w);boolean editing=node.path.equals(quantityPath);
-        boolean hover=field.contains(contentX(mx),contentY(my));
+        boolean hover=quantityEditable(node) && field.contains(contentX(mx),contentY(my));
         g.fill(field.x(),field.y(),field.x()+field.width(),field.y()+field.height(),editing?0xFF303D50:visual.badgeBackground());
         frame(g,field.x(),field.y(),field.width(),field.height(),node.cycle?CANVAS_EDGE:editing||hover?ACCENT:BORDER);
         String count=editing?quantityText+"|":Long.toString(node.demand);
@@ -1476,10 +1495,10 @@ public final class RouteScreen extends Screen {
         g.fill(x,y,x+18,y+18,node.recipe!=null && selectedRecipe==node.recipe?0xFFC6C6D4:0xFFE4DFEB);frame(g,x,y,18,18,BORDER);
         if(node.recipe==null) {g.renderItem(appeng.core.definitions.AEItems.BLANK_PATTERN.stack(),x+1,y+1);return;}
         var recipe=node.recipe;
-        boolean blocked=nodeMenu || draggedMaterial!=null || workbench!=null && workbench.contains(mx,my);
+        boolean blocked=nodeMenu || draggedMaterial!=null || workbenchVisible() && workbench!=null && workbench.contains(mx,my);
         int hx=blocked?-1000000:(int)contentX(mx),hy=blocked?-1000000:(int)contentY(my);
         if(recipeMachineId(recipe)==null)nativeMachines.draw(g,node.path,recipeSources(recipe),x,y,hx,hy,ticks);
-        else if(browser!=null)browser.renderMachine(recipeMachineId(recipe),g,x,y,hx,hy);
+        else if(browser!=null)browser.renderRecipeBadge(recipeMachineId(recipe),g,x,y,hx,hy);
         else g.renderItem(appeng.core.definitions.AEItems.PROCESSING_PATTERN.stack(),x+1,y+1);
     }
     private String emcCostLabel(MNode node) {
@@ -1491,32 +1510,25 @@ public final class RouteScreen extends Screen {
     }
 
     private void drawNodeTooltip(GuiGraphics g,int mx,int my) {
-        if(nodeMenu || browser!=null && browser.draggingIngredient() || workbench!=null && workbench.contains(mx,my))return;
+        if(nodeMenu || draggedMaterial!=null || suggestionsVisible() || browser!=null && browser.draggingIngredient() || workbenchVisible() && workbench!=null && workbench.contains(mx,my)) {recipeHover.clear();return;}
+        if(recipeHover.contains(mx,my)) {recipeHover.render(g,mx,my);return;}
         var recipe=recipeAt(mx,my);
         if(recipe!=null) {
-            var lines=new ArrayList<Component>();
             var value=branchDrafts.get(recipe.parent.path);
-            if(recipeMachineId(recipe)==null)lines.addAll(RouteNativePatternIcon.tooltip(recipeSources(recipe)));
-            else if(browser!=null) lines.addAll(browser.machineTooltip(recipeMachineId(recipe)));
-            else lines.add(Component.literal("JEI 未启用，设备未知"));
-            lines.add(Component.literal("路径："+recipe.parent.path));
-            if(RouteEmcRules.isEmc(value))lines.add(Component.literal("EMC 消耗："+RouteEmcRules.cost(RouteEmcRules.unit(value),recipe.parent.demand)));
-            else {
-                lines.add(Component.literal("画布需求至少 "+forcedBatches(recipe)+" 批；应用后允许继续循环增产，库存共享"));
-                if(recipe.draft)lines.add(Component.literal("JEI 草稿尚未编码"));
-            }
-            if(!quantities.isEmpty())lines.add(Component.literal("含本地数量覆盖：此批次仅为画布估算，不提交服务端；实际按最终目标量校验"));
-            lines.add(Component.literal("机器图标：配方详情；悬停展开全部机器；节点拖动会带动下级；右键选择配方"));
-            g.renderComponentTooltip(font,lines,mx,my);
+            int x=canvasLeft+Math.round((panX+recipe.x)*zoom),y=canvasTop+18+Math.round((panY+recipe.y)*zoom);
+            recipeHover.offer(recipe.parent.path,recipe.parent.material.renderKey,recipeMachineId(recipe),recipe.choice,value,
+                    x,y,Math.max(1,Math.round(18*zoom)),Math.max(1,Math.round(18*zoom)),width,height);
+            recipeHover.render(g,mx,my);
             return;
         }
+        recipeHover.clear();
         var node=materialAt(mx,my);
         if(node==null)return;
         var lines=new ArrayList<Component>();
         if(quantityAt(mx,my)!=null) {
             lines.add(Component.literal(node.material.name+" · 数量 "+(node.path.equals(quantityPath)?quantityText:node.demand)));
-            lines.add(Component.literal(node.cycle?"回料引用数量只读":"点击输入；滚轮按批，Shift 单个；Ctrl+滚轮缩放"));
-            lines.add(Component.literal("Enter 确认，Esc 取消；非最终产物的数量覆盖仅为本地编辑"));
+            lines.add(Component.literal(quantityEditable(node)?"点击输入；滚轮按批，Shift 单个；Ctrl+滚轮缩放":"数量只读，由最终产物需求与配方自动推导"));
+            if(quantityEditable(node))lines.add(Component.literal("Enter 确认，Esc 取消"));
             g.renderComponentTooltip(font,lines,mx,my);return;
         }
         if(statusAt(mx,my)!=null) {drawStatusTooltip(g,node,mx,my);return;}
@@ -1714,7 +1726,7 @@ public final class RouteScreen extends Screen {
         int color = status != null && (status.startsWith("操作失败") || status.contains("失败")) ? RED : MUTED;
         String line=status == null ? "" : status;
         if(materialNodes.size()>=MAX_NODES)line="已达 80 节点显示上限；"+line;
-        text(g, line, 10, height - 18, contentRight() - 20, color);
+        text(g, line, windowBounds().left()+10, windowBounds().bottom()-18, windowBounds().width()-20, color);
     }
 
     private void drawWire(GuiGraphics g) {
@@ -1760,7 +1772,8 @@ public final class RouteScreen extends Screen {
         suggestionPage = Math.max(0, Math.min(suggestionPage, suggestionPages() - 1));
         int w = Math.max(itemId.getWidth() + 42, 250);
         int x = itemId.getX();
-        if (x + w > width - 8) x = width - 8 - w;
+        w=Math.min(w,windowBounds().width()-16);
+        x=Math.max(windowBounds().left()+8,Math.min(x,contentRight()-8-w));
         int y = itemId.getY() + itemId.getHeight() + 2;
         int rows = Math.min(perPage, suggestions.size() - suggestionPage * perPage);
         int h = 18 + rows * 20 + 2;
@@ -1858,14 +1871,14 @@ public final class RouteScreen extends Screen {
     @Override
     public boolean mouseClicked(double mx, double my, int button) {
         if (!usable()) return super.mouseClicked(mx,my,button);
-        if(nativeMachines.click(mx,my,button))return true;
+        if(recipeHover.contains(mx,my))return true;
         if(browser!=null && browser.clickMachineOverlay(mx,my,button))return true;
         if(nodeMenu) {
             for(var hit:nodeMenuHits)if(inside(mx,my,hit.x1,hit.y1,hit.x2-hit.x1,hit.y2-hit.y1)) {if(button==0)hit.action.run();return true;}
             if(inside(mx,my,nodeMenuLeft,nodeMenuTop,nodeMenuWidth,nodeMenuHeight))return true;
             nodeMenu=false; // Close without swallowing a drag beginning outside this popup.
         }
-        if(workbench!=null && workbench.click(mx,my,button)) {
+        if(workbenchVisible() && workbench!=null && workbench.click(mx,my,button)) {
             if(itemId!=null)itemId.setFocused(false);
             cancelQuantity();
             return true;
@@ -1874,7 +1887,7 @@ public final class RouteScreen extends Screen {
             if (itemId != null && itemId.isFocused()) onSearchChanged(itemId.getValue());
             return true;
         }
-        if(mx>=contentRight())return false;
+        if(mx<windowBounds().left() || mx>=contentRight() || my<windowBounds().top() || my>=windowBounds().bottom())return false;
         if (button == 2) {
             MNode hit = materialAt(mx, my);
             if (hit != null) startQuantityEdit(hit);
@@ -1939,12 +1952,12 @@ public final class RouteScreen extends Screen {
             selectedKey = material.material.key;
             selectedRecipe = null;
             if(recipePortHit(material,mx,my) && button==0 && material.recipe!=null) {
-                selectedRecipe=material.recipe;return true;
+                selectedRecipe=material.recipe;if(narrow()){narrowInspector=true;buildWidgets();}return true;
             }
             if (RouteNodeInteraction.press(button,recipePortHit(material,mx,my))==RouteNodeInteraction.Action.RECIPES) {
                 openNodeMenu(material,mx,my,true);
             } else {
-                nativeMachines.clearOverlay();if(browser!=null)browser.clearMachineOverlay();
+                if(browser!=null)browser.clearMachineOverlay();
                 draggedMaterial = material;
                 dragGeometry=graphGeometry();
                 nodeDragMoved=false;
@@ -1957,6 +1970,7 @@ public final class RouteScreen extends Screen {
             }
             return true;
         }
+        if(narrow() && narrowInspector)return true;
         if (inside(mx, my, canvasLeft, canvasTop + 18, canvasWidth(), canvasBottom - canvasTop - 18)) {
             panning = true;
             autoCenter = false;
@@ -1971,6 +1985,7 @@ public final class RouteScreen extends Screen {
     }
 
     private MNode materialAt(double mx, double my) {
+        if(narrow() && narrowInspector)return null;
         if (!inside(mx, my, canvasLeft, canvasTop + 16, canvasWidth(), canvasBottom - canvasTop - 16)) return null;
         double x = contentX(mx), y = contentY(my);
         for (int i = materialNodes.size() - 1; i >= 0; i--) {
@@ -1981,6 +1996,7 @@ public final class RouteScreen extends Screen {
     }
 
     private RNode recipeAt(double mx, double my) {
+        if(narrow() && narrowInspector)return null;
         if (!inside(mx, my, canvasLeft, canvasTop + 16, canvasWidth(), canvasBottom - canvasTop - 16)) return null;
         double x = contentX(mx), y = contentY(my);
         for (int i = recipeNodes.size() - 1; i >= 0; i--) {
@@ -1996,7 +2012,7 @@ public final class RouteScreen extends Screen {
 
     @Override
     public boolean mouseDragged(double mx, double my, int button, double dx, double dy) {
-        if(workbench!=null && workbench.drag(mx,my))return true;
+        if(workbenchVisible() && workbench!=null && workbench.drag(mx,my))return true;
         if(draggedMaterial==null && !panning && nativeRecipeVisible() && browser.drag(mx,my,button,dx,dy))return true;
         if (wireFrom != null) {
             wireX = mx;
@@ -2022,7 +2038,7 @@ public final class RouteScreen extends Screen {
     public boolean mouseReleased(double mx, double my, int button) {
         setDragging(false);
         if(browser!=null && browser.release(mx,my,button,this::dropRecipeIngredient))return true;
-        if(workbench!=null && workbench.release(mx,my))return true;
+        if(workbenchVisible() && workbench!=null && workbench.release(mx,my))return true;
         if (wireFrom != null) {
             ChoiceHit hit = choiceAt(mx, my);
             if (hit == null) {
@@ -2066,7 +2082,7 @@ public final class RouteScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mx, double my, double scrollX, double scrollY) {
-        if(nativeMachines.scroll(mx,my,scrollY))return true;
+        if(recipeHover.contains(mx,my))return true;
         if(browser!=null && browser.scrollMachineOverlay(mx,my,scrollY))return true;
         if (suggestionsVisible() && inside(mx,my,suggestionX,suggestionY,suggestionW,suggestionH)) {
             if (scrollY != 0) suggestionPage = Math.max(0, Math.min(suggestionPages()-1,
@@ -2074,9 +2090,9 @@ public final class RouteScreen extends Screen {
             return true;
         }
         if(nodeMenu) {if(nodeMenuRecipes && scrollY!=0)moveNodeMenuPage(scrollY<0?1:-1);return true;}
-        if(workbench!=null && workbench.scroll(mx,my,scrollY))return true;
+        if(workbenchVisible() && workbench!=null && workbench.scroll(mx,my,scrollY))return true;
         if (scrollY==0 && scrollX==0)return false;
-        if (inside(mx, my, panelLeft, canvasTop, panelW, canvasBottom - canvasTop)) {
+        if ((!narrow() || narrowInspector) && inside(mx, my, panelLeft, canvasTop, panelW, canvasBottom - canvasTop)) {
             if(nativeRecipeVisible()) {
                 if(!browser.scroll(mx,my,scrollX,scrollY) && scrollY!=0)browser.page(scrollY<0?1:-1);return true;
             }
@@ -2086,10 +2102,10 @@ public final class RouteScreen extends Screen {
         }
         if (inside(mx, my, canvasLeft, canvasTop, canvasWidth(), canvasBottom - canvasTop)) {
             var hit=materialAt(mx,my);
-            if(RouteQuantityField.wheelEdits(quantityAt(mx,my)!=null,hasControlDown(),scrollX!=0,hit!=null && hit.cycle)) {
+            if(RouteQuantityField.wheelEdits(quantityAt(mx,my)!=null && quantityEditable(hit),hasControlDown(),scrollX!=0,hit!=null && hit.cycle)) {
                 if(scrollY!=0)adjustQuantity(hit,scrollY>0?1:-1,hasShiftDown());return true;
             }
-            var intent=RouteWheelIntent.of(hasControlDown(),hasShiftDown(),hasAltDown(),hit!=null && !hit.cycle,
+            var intent=RouteWheelIntent.of(hasControlDown(),hasShiftDown(),hasAltDown(),quantityEditable(hit),
                     scrollX!=0,com.aecraftroute.addon.config.CraftRouteConfig.scrollEditsQuantity());
             if(intent==RouteWheelIntent.QUANTITY) {
                 if(scrollY!=0)adjustQuantity(hit,scrollY>0?1:-1,hasShiftDown());return true;
@@ -2113,7 +2129,7 @@ public final class RouteScreen extends Screen {
 
     @Override
     public boolean charTyped(char codePoint, int modifiers) {
-        if(workbench!=null && (workbench.charTyped(codePoint,modifiers) || workbench.focused()))return true;
+        if(workbenchVisible() && workbench!=null && (workbench.charTyped(codePoint,modifiers) || workbench.focused()))return true;
         if (quantityPath != null && (itemId == null || !itemId.isFocused())) {
             if (codePoint >= '0' && codePoint <= '9') {
                 if (quantityFresh) { quantityText = ""; quantityFresh = false; }
@@ -2127,7 +2143,7 @@ public final class RouteScreen extends Screen {
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
         if(keyCode==GLFW.GLFW_KEY_ESCAPE && nodeMenu) {backNodeMenu();return true;}
-        if(workbench!=null && (workbench.keyPressed(keyCode,scanCode,modifiers) || workbench.focused()))return true;
+        if(workbenchVisible() && workbench!=null && (workbench.keyPressed(keyCode,scanCode,modifiers) || workbench.focused()))return true;
         if (quantityPath != null && (itemId == null || !itemId.isFocused())) {
             if(keyCode==GLFW.GLFW_KEY_A && hasControlDown())quantityFresh=true;
             else if(keyCode==GLFW.GLFW_KEY_V && hasControlDown()) {
@@ -2180,7 +2196,7 @@ public final class RouteScreen extends Screen {
     /** Area where JEI can drop an item/fluid to make it the target. */
     public net.minecraft.client.renderer.Rect2i getDropArea() {
         return new net.minecraft.client.renderer.Rect2i(canvasLeft, canvasTop,
-                Math.max(1, canvasWidth()), Math.max(1, (workbench==null?canvasBottom:workbench.dropBottom()) - canvasTop));
+                Math.max(1, canvasWidth()), Math.max(1, (!workbenchVisible() || workbench==null?canvasBottom:workbench.dropBottom()) - canvasTop));
     }
 
     public void acceptDroppedIngredient(AEKey key) {
@@ -2220,6 +2236,7 @@ public final class RouteScreen extends Screen {
             } else if(RouteRequestRules.mutation(request.action))status="服务器未在 10 秒内确认；未自动重试，请检查缓存后再操作";
         }
         if(browser!=null)browser.tick();
+        recipeHover.tick();
         if(workbench!=null)workbench.tick();
         retryBeginIfDue();
         if(workbench!=null && ++workbenchTicks%40==0)workbench.refresh();

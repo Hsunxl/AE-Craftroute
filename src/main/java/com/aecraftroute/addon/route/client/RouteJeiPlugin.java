@@ -45,16 +45,15 @@ public final class RouteJeiPlugin implements IModPlugin {
         registration.addGuiScreenHandler(RouteScreen.class, screen -> {
             var window=Minecraft.getInstance().getWindow();
             // Opening events run before Screen.init. Snapshot one consistent geometry for JEI.
-            var layout=RouteLayout.forScreen(screen.width,screen.height,
-                    window.getGuiScaledWidth(),window.getGuiScaledHeight());
+            var bounds=screen.windowBounds();
             return new mezz.jei.api.gui.handlers.IGuiProperties() {
             public Class<? extends net.minecraft.client.gui.screens.Screen> screenClass() { return RouteScreen.class; }
-            public int guiLeft() { return 0; }
-            public int guiTop() { return 0; }
-            public int guiXSize() { return layout.contentRight(); }
-            public int guiYSize() { return layout.height(); }
-            public int screenWidth() { return layout.width(); }
-            public int screenHeight() { return layout.height(); }
+            public int guiLeft() { return bounds.left(); }
+            public int guiTop() { return bounds.top(); }
+            public int guiXSize() { return bounds.width(); }
+            public int guiYSize() { return bounds.height(); }
+            public int screenWidth() { return screen.width>0?screen.width:window.getGuiScaledWidth(); }
+            public int screenHeight() { return screen.height>0?screen.height:window.getGuiScaledHeight(); }
             };
         });
         registration.addGhostIngredientHandler(RouteScreen.class, new IGhostIngredientHandler<RouteScreen>() {

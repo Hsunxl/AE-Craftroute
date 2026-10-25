@@ -7,7 +7,10 @@ import java.util.List;
 public final class RoutePatternPresentation {
     private RoutePatternPresentation() {}
     public static List<RouteView.PatternSource> sources(RouteView.Choice choice,RouteView.Reply reply) {
-        if(reply!=null)for(var current:reply.choices())if(current.id().equals(choice.id()))return current.sources();
+        if(reply!=null) {
+            for(var current:reply.choices())if(current.id().equals(choice.id()))return current.sources();
+            if(!reply.truncated() && (reply.message()==null || !reply.message().startsWith("操作失败")))return List.of();
+        }
         return choice.sources();
     }
 }

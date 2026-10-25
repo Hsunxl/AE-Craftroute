@@ -8,7 +8,8 @@ class RouteNodeMenuTest {
     @Test void firstLevelHasCategoriesNotDestructiveOperations() {
         assertEquals(5,entries(Page.ROOT,ordinary).size());
         assertFalse(entries(Page.ROOT,ordinary).stream().anyMatch(e->e.action()==Action.DELETE||e.action()==Action.CLEAR));
-        assertTrue(entries(Page.ROOT,ordinary).stream().allMatch(Entry::enabled));
+        assertFalse(entry(Page.ROOT,Action.QUANTITY,ordinary).enabled());
+        assertTrue(entries(Page.ROOT,ordinary).stream().filter(e->e.action()!=Action.QUANTITY).allMatch(Entry::enabled));
     }
     @Test void branchSubmenuRetainsNonDestructiveFoldAndRecipeSelection() {
         assertTrue(entry(Page.BRANCH,Action.TOGGLE,ordinary).label().contains("保留配方与数量"));
@@ -19,11 +20,13 @@ class RouteNodeMenuTest {
         assertFalse(entry(Page.BRANCH,Action.TOGGLE,new Context(true,false,false,false,false)).enabled());
         assertFalse(entry(Page.BRANCH,Action.TOGGLE,new Context(true,true,false,true,false)).enabled());
     }
-    @Test void resettingNumbersNeedsAnActualNonRootOverride() {
-        assertTrue(entry(Page.QUANTITY,Action.RESET,ordinary).enabled());
-        assertFalse(entry(Page.QUANTITY,Action.RESET,new Context(true,true,true,false,true)).enabled());
-        assertFalse(entry(Page.QUANTITY,Action.RESET,new Context(true,true,false,false,false)).enabled());
-        assertFalse(entry(Page.QUANTITY,Action.EDIT,new Context(true,true,false,true,true)).enabled());
+    @Test void onlyFinalProductHasQuantityEditingAndNoDerivedOverridesExist() {
+        for(boolean root:new boolean[]{false,true})for(boolean cycle:new boolean[]{false,true})for(boolean override:new boolean[]{false,true}) {
+            var ctx=new Context(true,true,root,cycle,override);
+            assertEquals(root&&!cycle,entry(Page.ROOT,Action.QUANTITY,ctx).enabled());
+            assertEquals(root&&!cycle,entry(Page.QUANTITY,Action.EDIT,ctx).enabled());
+            assertTrue(entries(Page.QUANTITY,ctx).stream().noneMatch(e->e.action()==Action.RESET));
+        }
     }
     @Test void removalIsExplicitAboutClearingTheRoot() {
         assertTrue(entry(Page.REMOVE,Action.DELETE,new Context(true,true,true,false,false)).label().contains("清空画布"));

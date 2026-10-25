@@ -9,6 +9,7 @@ public record RouteQuantityField(int x,int y,int width,int height) {
         return new RouteQuantityField(nodeX+4,nodeY+36,Math.max(1,nodeWidth-8),16);
     }
     public boolean contains(double mx,double my) {return mx>=x && mx<x+width && my>=y && my<y+height;}
+    public static boolean editable(boolean finalProduct,boolean cycle) {return finalProduct && !cycle;}
     public static boolean wheelEdits(boolean overField,boolean ctrl,boolean horizontal,boolean cycle) {
         return overField && !ctrl && !horizontal && !cycle;
     }
