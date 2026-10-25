@@ -83,6 +83,8 @@ public final class NetworkProductionPlanner {
         if(result.status()!=ProductionPlanner.Status.FEASIBLE) {
             if(incomplete) throw new ProductionPlanningException(UNSUPPORTED,"部分样板替代输入尚未穷尽；没有已验证方案，不代表缺料");
             if(result.status()==ProductionPlanner.Status.LIMIT) throw new ProductionPlanningException(LIMIT,"计算预算已用尽，尚未判定可行性；不是缺料，也未退回旧算法");
+            if(result.maximumAdditionalTarget()!=null) throw new ProductionPlanningException(UNREACHABLE,
+                    "资源总量不足：验证全部候选转换后，当前库存至多可净增 "+result.maximumAdditionalTarget()+" 个目标，请求为 "+increment+"；不是合成数量上限");
             throw new ProductionPlanningException(UNREACHABLE,"当前库存与已编码样板无法达到净增量目标（可能缺原料、启动材料或只有无效循环）");
         }
         var used=new KeyCounter(); result.used().forEach(used::add);

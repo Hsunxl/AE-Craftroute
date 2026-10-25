@@ -34,7 +34,11 @@ public final class ProductionPlanner<K, R> {
         public Block { word = List.copyOf(word); if (word.isEmpty() || repetitions <= 0) throw new IllegalArgumentException("Invalid block"); }
     }
     public record Result<K,R>(Status status, List<Block<R>> program, Map<K,Long> used,
-                              Map<R,Long> counts, int explored) {}
+                              Map<R,Long> counts, int explored,BigInteger maximumAdditionalTarget) {
+        public Result(Status status,List<Block<R>> program,Map<K,Long> used,Map<R,Long> counts,int explored) {
+            this(status,program,used,counts,explored,null);
+        }
+    }
     public record Limits(int states, long nanos) {
         public Limits { if (states <= 0 || nanos <= 0) throw new IllegalArgumentException("Invalid limits"); }
         public static Limits defaults() { return new Limits(30_000, 3_000_000_000L); }
@@ -51,6 +55,8 @@ public final class ProductionPlanner<K, R> {
     private CompiledProductionGraph compiled;
     private boolean dagFastPath;
     boolean dagFastPathUsed(){return dagFastPath;}
+    private boolean resourceBound;
+    boolean resourceBoundUsed(){return resourceBound;}
     private final Deque<Node> fair = new ArrayDeque<>();
     private final class Node {
         final BigInteger[] need;
@@ -321,11 +327,20 @@ public final class ProductionPlanner<K, R> {
     }
     public Result<K,R> solve(K target, long increment) {
         if(increment<=0) throw new IllegalArgumentException("Increment must be positive");
-        started=System.nanoTime(); fair.clear(); clipped=false; serial=0;dagFastPath=false;
+        started=System.nanoTime(); fair.clear(); clipped=false; serial=0;dagFastPath=false;resourceBound=false;
         int targetIndex=keys.indexOf(target);
         if(targetIndex<0) return failure(Status.UNREACHABLE,0);
         var goal=vector(); goal[targetIndex]=stock[targetIndex].add(BigInteger.valueOf(increment));
         var aggregated=dag(targetIndex,goal,increment);if(aggregated!=null)return aggregated;
+        // A failed constructive shortcut is NOT missing-material evidence. Try a
+        // separately verified conservation certificate before exploring potentially
+        // thousands of equivalent per-firing predecessors of an oversized order.
+        if(compiled!=null && limits.states>=64 && !expired()) {
+            long boundStarted=System.nanoTime(),allowance=Math.min(50_000_000L,limits.nanos/16);
+            var bound=ConservedResourceBound.prove(compiled,stock,targetIndex,increment,
+                    ()->expired() || System.nanoTime()-boundStarted>=allowance);
+            if(bound!=null){resourceBound=true;return new Result<>(Status.UNREACHABLE,List.of(),Map.of(),Map.of(),1,bound.maximumAdditionalTarget());}
+        }
         var attempt=probe(targetIndex,goal,increment);
         if(attempt.feasible!=null) return attempt.feasible;
         var queue=new PriorityQueue<Node>(Comparator.comparingDouble((Node n)->n.score).thenComparingLong(n->n.order));
