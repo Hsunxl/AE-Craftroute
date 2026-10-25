@@ -69,6 +69,7 @@ import java.util.concurrent.TimeUnit;
 public final class SelftestHarness {
     static final Logger LOG = LoggerFactory.getLogger("aecraftroute-selftest");
     static final String PROP = "aecraftroute.selftest";
+    static final String TASK_PROP = "aecraftroute.selftest.task";
 
     /** Isolated build site inside spawn chunks, well above the flat surface. */
     static final BlockPos BASE = new BlockPos(4, 120, 4);
@@ -153,6 +154,14 @@ public final class SelftestHarness {
                     ""), StandardCharsets.UTF_8);
         }
 
+        // Every scenario except restart2 builds its world from scratch. A world left
+        // behind by an earlier run still holds stock, patterns and a busy CPU, which
+        // silently changes the starting capital of this run. restart2 is the second
+        // half of restart1 and deliberately reuses the world restart1 saved.
+        if (!"restart2".equals(System.getProperty(TASK_PROP))) {
+            deleteWorld(gameDir.resolve("world"));
+        }
+
         Path pack = gameDir.resolve("world").resolve("datapacks").resolve(PACK);
         Files.createDirectories(pack.resolve("data/selftest/recipe"));
         Files.writeString(pack.resolve("pack.mcmeta"),
@@ -161,12 +170,25 @@ public final class SelftestHarness {
         writeRecipe(pack, "powder_to_crystal", "minecraft:emerald", 1, "minecraft:diamond", 1);
         writeRecipe(pack, "crystal_to_seed", "minecraft:diamond", 1, "minecraft:lapis_lazuli", 2);
         writeRecipe(pack, "seed_to_powder", "minecraft:lapis_lazuli", 1, "minecraft:emerald", 1);
-        if("paths".equals(System.getProperty("aecraftroute.selftest.task"))) {
+        if ("paths".equals(System.getProperty(TASK_PROP))) {
             writeRecipe(pack,"powder_to_seed","minecraft:emerald",1,"minecraft:lapis_lazuli",1);
             Files.writeString(pack.resolve("data/selftest/recipe/path_final.json"),
                     "{\"type\":\"minecraft:crafting_shapeless\",\"category\":\"misc\",\"ingredients\":[{\"item\":\"minecraft:emerald\"},{\"item\":\"minecraft:lapis_lazuli\"}],\"result\":{\"id\":\"minecraft:iron_block\",\"count\":1}}",StandardCharsets.UTF_8);
         }
         LOG.info("[SELFTEST] datapack written to {}", pack);
+    }
+
+    /** Removes a leftover verification world so every scenario starts from the same state. */
+    private static void deleteWorld(Path world) throws Exception {
+        if (!Files.isDirectory(world)) {
+            return;
+        }
+        try (var paths = Files.walk(world)) {
+            for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(path);
+            }
+        }
+        LOG.info("[SELFTEST] removed the previous verification world at {}", world);
     }
 
     private static void writeRecipe(Path pack, String name, String input, int inputCount,
@@ -230,7 +252,7 @@ public final class SelftestHarness {
 
         Scenario(MinecraftServer server) {
             this.server = server;
-            this.task = System.getProperty("aecraftroute.selftest.task", "growth");
+            this.task = System.getProperty(TASK_PROP, "growth");
             this.advanced = "advanced".equals(this.task);
             this.restart1 = "restart1".equals(this.task);
             this.restart2 = "restart2".equals(this.task);

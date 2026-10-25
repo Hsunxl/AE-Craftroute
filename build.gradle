@@ -51,7 +51,8 @@ neoForge {
             gameDirectory = project.file('run-selftest')
             jvmArguments.add('-Daecraftroute.selftest=1')
             jvmArguments.add('-Daecraftroute.selftest.exit=true')
-            jvmArguments.add("-Daecraftroute.selftest.task=${providers.gradleProperty('selftestTask').getOrElse('growth')}")
+            // Plain String, not a GString: ModDevGradle casts jvmArguments entries to String.
+            jvmArguments.add('-Daecraftroute.selftest.task=' + providers.gradleProperty('selftestTask').getOrElse('growth'))
         }
     }
 }
