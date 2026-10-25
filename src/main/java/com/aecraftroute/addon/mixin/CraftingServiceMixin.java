@@ -10,6 +10,7 @@ import appeng.api.networking.crafting.ICraftingSimulationRequester;
 import appeng.api.networking.crafting.ICraftingSubmitResult;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEKey;
+import appeng.me.cluster.implementations.CraftingCPUCluster;
 import appeng.me.service.CraftingService;
 import com.aecraftroute.addon.api.CraftRouteCraftingRegistry;
 import com.aecraftroute.addon.planner.CertifiedCraftingPlan;
@@ -42,54 +43,51 @@ public abstract class CraftingServiceMixin {
     }
 
     /**
-     * A certified plan is CPU-agnostic: it names patterns, not a machine. When the CPU the
-     * player happened to select reports {@code CPU_OFFLINE} - a stale entry in the confirm
-     * screen, a core that is not loaded, or a grid still booting - submit the same plan to
-     * AE2's own selection instead of failing the order. Nothing about the plan changes; only
-     * which executor runs it. A plan that is not certified is never touched.
+     * A third-party CPU bridge may return CPU_OFFLINE even for automatic selection. The
+     * previous target != null guard therefore skipped both recovery and diagnostics for
+     * exactly the real-world failures. Retry every advertised CPU, including the selected
+     * one: an explicit target is the only way to avoid an immediately repeating automatic
+     * selection. Never retry a refusal that consumed or could consume inputs (for example
+     * MISSING_INGREDIENT), and never submit twice after a success.
      */
     @WrapMethod(method = "submitJob")
-    private ICraftingSubmitResult aecraftroute$fallbackWhenSelectedCpuIsOffline(ICraftingPlan plan,
+    private ICraftingSubmitResult aecraftroute$retryOfflineCpu(ICraftingPlan plan,
             ICraftingRequester requestingMachine, ICraftingCPU target, boolean prioritizePower, IActionSource src,
             Operation<ICraftingSubmitResult> original) {
         ICraftingSubmitResult result = original.call(plan, requestingMachine, target, prioritizePower, src);
-        if (!(plan instanceof CertifiedCraftingPlan)) return result;
-        if (result != null && result.successful()) {
-            com.aecraftroute.addon.CraftRouteAddon.LOGGER.info(
-                    "[AE-Craftroute] certified plan attached: cpu={} plan={}", CpuProbe.describe(target), CpuProbe.describePlan(plan));
-            return result;
-        }
-        if (target == null || result == null) return result;
-        if (result.errorCode() != CraftingSubmitErrorCode.CPU_OFFLINE) {
-            try {
-                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
-                        "[AE-Craftroute] certified plan refused: error={} detail={} target={} cpus={}",
-                        result.errorCode(), result.errorDetail(), CpuProbe.describe(target), CpuProbe.describeGrid(grid));
-            } catch (RuntimeException ignored) { }
-            return result;
-        }
-        ICraftingSubmitResult retry;
+        if (result == null || result.successful() || result.errorCode() != CraftingSubmitErrorCode.CPU_OFFLINE) return result;
+        var attempts = new java.util.ArrayList<String>();
+        attempts.add("initial=" + result.errorCode() + " target=" + CpuProbe.describe(target));
+        ICraftingSubmitResult last = result;
         try {
-            retry = original.call(plan, requestingMachine, null, prioritizePower, src);
+            for (ICraftingCPU candidate : grid.getCraftingService().getCpus()) {
+                if (candidate == target) continue;
+                // The certified executor is installed only on native and AdvancedAE CPUs.
+                // Do not feed its program to Trinity/ECO executors with different contracts.
+                boolean compatible = candidate instanceof CraftingCPUCluster
+                        || candidate.getClass().getName().startsWith("net.pedroksl.advanced_ae.");
+                if (plan instanceof CertifiedCraftingPlan && !compatible) {
+                    attempts.add(CpuProbe.describe(candidate) + " -> skipped incompatible certified executor");
+                    continue;
+                }
+                ICraftingSubmitResult retry = original.call(plan, requestingMachine, candidate, prioritizePower, src);
+                if (retry != null && retry.successful()) {
+                    com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                            "[AE-Craftroute] false CPU_OFFLINE recovered on another CPU: plan={} attempts={} attached={}",
+                            CpuProbe.describePlan(plan), attempts, CpuProbe.describe(candidate));
+                    return retry;
+                }
+                attempts.add(CpuProbe.describe(candidate) + " -> "
+                        + (retry == null ? "<null>" : retry.errorCode() + " detail=" + retry.errorDetail()));
+                if (retry != null) last = retry;
+            }
         } catch (RuntimeException failed) {
-            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
-                    "[AE-Craftroute] certified plan could not be re-submitted after CPU_OFFLINE: {}", failed.toString());
-            return result;
+            attempts.add("retry aborted=" + failed);
         }
-        if (retry != null && retry.successful()) {
-            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
-                    "[AE-Craftroute] selected CPU reported CPU_OFFLINE; the certified plan was attached to another CPU. selected={} cpus={}",
-                    CpuProbe.describe(target), CpuProbe.describeGrid(grid));
-            return retry;
-        }
-        try {
-            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
-                    "[AE-Craftroute] no CPU accepted the certified plan: first={} selected={} retry={} detail={} cpus={}",
-                    result.errorCode(), CpuProbe.describe(target),
-                    retry == null ? "<null>" : retry.errorCode(), retry == null ? null : retry.errorDetail(),
-                    CpuProbe.describeGrid(grid));
-        } catch (RuntimeException ignored) { }
-        return retry != null ? retry : result;
+        com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                "[AE-Craftroute] CPU_OFFLINE submission exhausted all advertised CPUs: plan={} attempts={} cpus={}",
+                CpuProbe.describePlan(plan), attempts, CpuProbe.describeGrid(grid));
+        return last;
     }
     
     /** Intercept only registered requesters; manual constraints never fall back. */

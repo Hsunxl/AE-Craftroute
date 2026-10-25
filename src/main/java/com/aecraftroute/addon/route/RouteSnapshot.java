@@ -86,14 +86,13 @@ public final class RouteSnapshot {
         /** Revalidation runs on server ticks before an apply commit. */
         public Iterator<Map.Entry<AEKey,List<IPatternDetails>>> validation() {return observed.entrySet().iterator();}
         public appeng.api.stacks.KeyCounter liveInventory() {return grid.getStorageService().getInventory().getAvailableStacks();}
-        public boolean unchanged(Map.Entry<AEKey,List<IPatternDetails>> entry,appeng.api.stacks.KeyCounter live) {
+        public boolean unchanged(Map.Entry<AEKey,List<IPatternDetails>> entry) {
             var current=List.copyOf(grid.getCraftingService().getCraftingFor(entry.getKey()));
             for(var pattern:current) {
                 try {com.aecraftroute.addon.compat.ScaledPatternCompat.validate(pattern);}
                 catch(IllegalArgumentException invalid) {throw new ProductionPlanningException(UNSUPPORTED,"网络变更后的样板包装无法安全解析");}
             }
-            if(!entry.getValue().equals(current))return false;
-            return stock.getOrDefault(entry.getKey(),0L)==Math.max(0,live.get(entry.getKey()));
+            return entry.getValue().equals(current);
         }
     }
     public static Result build(IGrid grid,RoutePolicy<AEKey> policy,HolderLookup.Provider registries,AEKey target) {

@@ -1,6 +1,8 @@
 package com.aecraftroute.addon.route;
 
 import appeng.api.crafting.IPatternDetails;
+import appeng.api.networking.IGrid;
+import appeng.api.networking.crafting.ICraftingService;
 import appeng.api.stacks.AEKey;
 import com.aecraftroute.addon.bench.*;
 import com.aecraftroute.addon.planner.*;
@@ -28,7 +30,7 @@ class RoutePlanningServiceTest {
             int calls;
             public boolean advance() {assertSame(serverThread,Thread.currentThread());captures.incrementAndGet();return ++calls>=2;}
             public RouteSnapshot.Result result() {assertSame(serverThread,Thread.currentThread());return new RouteSnapshot.Result(Map.of(target,List.of(pattern)),Map.of(ore,1L));}
-            public void validate(long deadline,long validationEnd) {
+            public void validate(long deadline,long validationEnd,com.aecraftroute.addon.planner.CertifiedCraftingPlan plan) {
                 assertSame(serverThread,Thread.currentThread());validations.incrementAndGet();
                 if(changed)throw new ProductionPlanningException(ProductionPlanningException.Reason.INVALID,"network snapshot changed");
             }
@@ -126,7 +128,7 @@ class RoutePlanningServiceTest {
         RoutePlanningService.CaptureWork failingCapture=new RoutePlanningService.CaptureWork() {
             public boolean advance(){throw new ProductionPlanningException(ProductionPlanningException.Reason.LIMIT,"capture budget exhausted");}
             public RouteSnapshot.Result result(){throw new AssertionError("capture did not complete");}
-            public void validate(long deadline,long validationEnd){throw new AssertionError("must not validate");}
+            public void validate(long deadline,long validationEnd,com.aecraftroute.addon.planner.CertifiedCraftingPlan plan){throw new AssertionError("must not validate");}
         };
         var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,failingCapture);tick(job);
         var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
@@ -138,7 +140,7 @@ class RoutePlanningServiceTest {
         RoutePlanningService.CaptureWork failingValidation=new RoutePlanningService.CaptureWork() {
             public boolean advance(){return true;}
             public RouteSnapshot.Result result(){return new RouteSnapshot.Result(Map.of(target,List.of(plain)),Map.of(ore,1L));}
-            public void validate(long deadline,long validationEnd){throw new ProductionPlanningException(ProductionPlanningException.Reason.LIMIT,"validation budget exhausted");}
+            public void validate(long deadline,long validationEnd,com.aecraftroute.addon.planner.CertifiedCraftingPlan plan){throw new ProductionPlanningException(ProductionPlanningException.Reason.LIMIT,"validation budget exhausted");}
         };
         var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,failingValidation);
         tick(job);finishWorker(job);tick(job);
@@ -185,10 +187,43 @@ class RoutePlanningServiceTest {
         RoutePlanningService.CaptureWork failingCapture=new RoutePlanningService.CaptureWork() {
             public boolean advance(){throw original;}
             public RouteSnapshot.Result result(){throw new AssertionError("capture did not complete");}
-            public void validate(long deadline,long validationEnd){throw new AssertionError("must not validate");}
+            public void validate(long deadline,long validationEnd,com.aecraftroute.addon.planner.CertifiedCraftingPlan plan){throw new AssertionError("must not validate");}
         };
         var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,failingCapture);tick(job);
         var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
         assertSame(original,error.getCause());
+    }
+
+    private RoutePlanningService.Job liveJob(Map<BenchAEKey,Long> stock) {
+        ICraftingService crafting=(ICraftingService)Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class[]{ICraftingService.class},(proxy,method,args)->{
+                    if(method.getName().equals("getCraftingFor"))return args[0]==target?List.of(plain):List.of();
+                    if(method.getName().equals("hashCode"))return System.identityHashCode(proxy);
+                    if(method.getName().equals("equals"))return proxy==args[0];
+                    if(method.getName().equals("toString"))return "live-test-crafting";
+                    Class<?> type=method.getReturnType();
+                    if(type==boolean.class)return false;if(type==int.class)return 0;if(type==long.class)return 0L;
+                    return null;
+                });
+        var base=new FakeBenchGrid(stock);
+        IGrid grid=(IGrid)Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{IGrid.class},(proxy,method,args)->{
+            if(method.getName().equals("getCraftingService"))return crafting;
+            return method.invoke(base,args);
+        });
+        return new RoutePlanningService.Job(grid,policy,null,target,1,limits,()->true);
+    }
+    @Test void stockMovementOutsideRequiredStartupCapitalDoesNotInvalidateAProvenPlan() throws Exception {
+        var stock=new HashMap<BenchAEKey,Long>();stock.put(ore,1L);
+        var job=liveJob(stock);tick(job);finishWorker(job);
+        stock.put(ore,2L);stock.put(target,99L); // More stock and unrelated output stock are both harmless.
+        tick(job);assertNotNull(job.result.get(1,TimeUnit.SECONDS));
+    }
+    @Test void missingRequiredStartupCapitalStillRejectsThePlanBeforeSubmit() throws Exception {
+        var stock=new HashMap<BenchAEKey,Long>();stock.put(ore,1L);
+        var job=liveJob(stock);tick(job);finishWorker(job);stock.put(ore,0L);tick(job);
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
+        assertEquals(ProductionPlanningException.Reason.INVALID,failure.reason());
+        assertTrue(failure.getMessage().contains("起手材料"));
     }
 }

@@ -30,18 +30,28 @@ public final class RoutePlanningService {
     interface CaptureWork {
         boolean advance();
         RouteSnapshot.Result result();
-        void validate(long deadline,long validationEnd);
+        void validate(long deadline,long validationEnd,CertifiedCraftingPlan plan);
     }
     private static final class LiveCapture implements CaptureWork {
         final RouteSnapshot.Capture source;
         LiveCapture(RouteSnapshot.Capture source){this.source=source;}
         public boolean advance(){return source.advance();}
         public RouteSnapshot.Result result(){return source.result();}
-        public void validate(long deadline,long validationEnd) {
+        public void validate(long deadline,long validationEnd,CertifiedCraftingPlan plan) {
             var live=source.liveInventory();RouteCanvasPlanner.check(deadline);
             var entries=source.validation();
             while(entries.hasNext()) {
-                if(!source.unchanged(entries.next(),live))throw new ProductionPlanningException(INVALID,"网络样板或库存已变化；旧计划已丢弃，请重试");
+                if(!source.unchanged(entries.next()))throw new ProductionPlanningException(INVALID,"网络样板已变化；旧计划已丢弃，请重试");
+                RouteCanvasPlanner.check(validationEnd);
+            }
+            // The proof needs executable inputs, not a frozen network. Stock changes in
+            // unrelated parts of a busy ATM10 grid must not invalidate an otherwise valid
+            // plan. Native tryExtractInitialItems still checks these amounts atomically
+            // before consuming anything, so a later race remains a safe missing-item refusal.
+            for(var entry:plan.usedItems()) {
+                long needed=entry.getLongValue();
+                if(needed>0 && Math.max(0,live.get(entry.getKey()))<needed)
+                    throw new ProductionPlanningException(INVALID,"起手材料在提交前已不足："+entry.getKey()+"；请重新规划");
                 RouteCanvasPlanner.check(validationEnd);
             }
         }
@@ -101,7 +111,7 @@ public final class RoutePlanningService {
                     // validate across ticks then claim the early keys are still current.
                     long validationEnd=Math.min(deadline,System.nanoTime()+SLICE_NANOS);
                     phase=Phase.VALIDATION;long validationStart=System.nanoTime();
-                    try {capture().validate(deadline,validationEnd);} finally {validationNanos+=System.nanoTime()-validationStart;}
+                    try {capture().validate(deadline,validationEnd,plan);} finally {validationNanos+=System.nanoTime()-validationStart;}
                     if(!valid.getAsBoolean()) {result.cancel(true);return;}
                     RouteCanvasPlanner.check(deadline);phase=Phase.COMPLETE;result.complete(plan);
                 }
