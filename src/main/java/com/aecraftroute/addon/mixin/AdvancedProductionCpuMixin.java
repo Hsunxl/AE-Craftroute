@@ -24,13 +24,14 @@ import net.pedroksl.advanced_ae.common.cluster.AdvCraftingCPU;
 /** Certified dispatch, actual-return feedback, then delivery. No ring detector. */
 @Pseudo
 @Mixin(targets="net.pedroksl.advanced_ae.common.logic.AdvCraftingCPULogic",remap=false)
-public abstract class AdvancedProductionCpuMixin {
+public abstract class AdvancedProductionCpuMixin implements com.aecraftroute.addon.compat.CertifiedExecutionOwner {
     @Shadow private ExecutingCraftingJob job;
     @Shadow @Final private ListCraftingInventory inventory;
     @Shadow @Final private AdvCraftingCPU cpu;
     @Shadow private void finishJob(boolean success) { throw new AssertionError(); }
     @Shadow private void postChange(AEKey key) { throw new AssertionError(); }
     @Unique private ProductionJob aecraftroute$production;
+    @Override public boolean aecraftroute$hasCertifiedProgram() {return aecraftroute$production!=null;}
     @Unique private final com.aecraftroute.addon.telemetry.LogThrottle aecraftroute$deliveryLogs = new com.aecraftroute.addon.telemetry.LogThrottle();
     @Unique private Object aecraftroute$lastPosition;
     @Unique private long aecraftroute$stallSince, aecraftroute$lastStallLog;

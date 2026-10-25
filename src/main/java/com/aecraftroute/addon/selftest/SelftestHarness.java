@@ -783,6 +783,7 @@ public final class SelftestHarness {
                 finish();
                 return;
             }
+            verifyExternalBatchIsolation();
             link = result.link();
             if (link != null) {
                 requester.jobStateChange(link);
@@ -803,6 +804,32 @@ public final class SelftestHarness {
             }
             phase = Phase.RUN;
             phaseTicks = 0;
+        }
+
+        /** Runs against the actual Mixin-transformed NeoECO dispatcher and live CPU.
+         * A poison job fails on any task access: the ownership guard must return before
+         * the foreign batch path can read or mutate a certified job. Development only. */
+        private void verifyExternalBatchIsolation() {
+            if(!net.neoforged.fml.ModList.get().isLoaded("neoecoae"))return;
+            try {
+                Object owner=null;
+                for(var candidate:grid.getCraftingService().getCpus()) {
+                    if(!candidate.isBusy())continue;
+                    Object logic=candidate.getClass().getField("craftingLogic").get(candidate);
+                    if(com.aecraftroute.addon.compat.CertifiedExecutionOwner.blocksExternalBatch(logic)) {owner=logic;break;}
+                }
+                if(owner==null)throw new AssertionError("Live certified CPU has no execution ownership marker");
+                Class<?> jobType=Class.forName("cn.dancingsnow.neoecoae.crafting.execution.ECOExternalCpuJob");
+                Object poison=java.lang.reflect.Proxy.newProxyInstance(jobType.getClassLoader(),new Class<?>[]{jobType},
+                        (proxy,method,args)->{throw new AssertionError("Foreign batch dispatcher accessed certified job: "+method.getName());});
+                Class<?> type=Class.forName("cn.dancingsnow.neoecoae.crafting.execution.ECOExternalCpuFastPath");
+                Object dispatcher=type.getConstructor(Runnable.class).newInstance((Runnable)()->{throw new AssertionError("Foreign batch mutated CPU");});
+                Object result=type.getMethod("execute",Object.class,Object.class,appeng.crafting.inv.ListCraftingInventory.class,
+                        int.class,appeng.me.service.CraftingService.class,appeng.api.networking.energy.IEnergyService.class,net.minecraft.world.level.Level.class)
+                        .invoke(dispatcher,owner,poison,null,1,null,null,null);
+                if(!Integer.valueOf(0).equals(result))throw new AssertionError("Expected native-dispatch fallback, got "+result);
+                LOG.info("[SELFTEST] external batch bypass blocked before task access; cpu={}",owner.getClass().getName());
+            } catch(Throwable failure) {fail("external batch isolation failed: "+rootCause(failure));}
         }
 
         // ------------------------------------------------------------ RUN
