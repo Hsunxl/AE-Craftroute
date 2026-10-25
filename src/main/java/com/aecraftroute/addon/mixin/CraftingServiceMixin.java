@@ -79,7 +79,13 @@ public abstract class CraftingServiceMixin {
                 }
                 attempts.add(CpuProbe.describe(candidate) + " -> "
                         + (retry == null ? "<null>" : retry.errorCode() + " detail=" + retry.errorDetail()));
-                if (retry != null) last = retry;
+                if (retry != null) {
+                    last = retry;
+                    // These are plan/input failures, not another offline executor. Stop
+                    // instead of hiding the useful error behind the last candidate tried.
+                    if (retry.errorCode() == CraftingSubmitErrorCode.MISSING_INGREDIENT
+                            || retry.errorCode() == CraftingSubmitErrorCode.INCOMPLETE_PLAN) return retry;
+                }
             }
         } catch (RuntimeException failed) {
             attempts.add("retry aborted=" + failed);
