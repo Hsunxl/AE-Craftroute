@@ -122,6 +122,11 @@ public final class CpuProbe {
         }
     }
 
+    /** Identity, not toString(): a grid's display text does not prove object identity. */
+    public static String identity(Object subject) {
+        return subject == null ? "<null>" : subject.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(subject));
+    }
+
     private static String plain(Object value) {
         if (value instanceof CharSequence text) return text.toString();
         try {

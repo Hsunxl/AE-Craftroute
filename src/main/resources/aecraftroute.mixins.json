@@ -15,6 +15,7 @@
         "AdvancedGrowthTimeAccessor",
         "AdvancedGrowthCpuMixin",
         "AdvancedProductionCpuMixin",
+        "AdvancedCraftingClusterMixin",
         "RouteMenuAccessor",
         "CraftConfirmRouteAccessor"
     ],
