@@ -31,12 +31,14 @@ public final class RoutePlanningService {
         boolean advance();
         RouteSnapshot.Result result();
         void validate(long deadline,long validationEnd,CertifiedCraftingPlan plan);
+        default boolean refresh(AEKey target){return false;}
     }
     private static final class LiveCapture implements CaptureWork {
-        final RouteSnapshot.Capture source;
+        RouteSnapshot.Capture source;
         LiveCapture(RouteSnapshot.Capture source){this.source=source;}
         public boolean advance(){return source.advance();}
         public RouteSnapshot.Result result(){return source.result();}
+        public boolean refresh(AEKey target){source=source.refreshed(target);return true;}
         public void validate(long deadline,long validationEnd,CertifiedCraftingPlan plan) {
             var live=source.liveInventory();RouteCanvasPlanner.check(deadline);
             var entries=source.validation();
@@ -50,8 +52,9 @@ public final class RoutePlanningService {
             // before consuming anything, so a later race remains a safe missing-item refusal.
             for(var entry:plan.usedItems()) {
                 long needed=entry.getLongValue();
-                if(needed>0 && Math.max(0,live.get(entry.getKey()))<needed)
-                    throw new ProductionPlanningException(INVALID,"起手材料在提交前已不足："+entry.getKey()+"；请重新规划");
+                long available=Math.max(0,live.get(entry.getKey()));
+                if(needed>0 && available<needed)
+                    throw ProductionPlanningException.startupStockChanged(entry.getKey(),needed,available);
                 RouteCanvasPlanner.check(validationEnd);
             }
         }
@@ -106,6 +109,10 @@ public final class RoutePlanningService {
         volatile Phase phase=Phase.CAPTURE,errorPhase;
         volatile long captureNanos,workerSubmittedAt,workerStartedAt,workerFinishedAt,validationNanos;
         private boolean diagnosticLogged;
+        private static final int MAX_STOCK_REPLANS=2;
+        int stockReplans;
+        private final Set<AEKey> unstableStock=new LinkedHashSet<>();
+        private long priorQueueNanos,priorComputeNanos;
         final CompletableFuture<CertifiedCraftingPlan> result=new CompletableFuture<>();
         volatile Future<?> worker; volatile CertifiedCraftingPlan plan; volatile Throwable error; volatile boolean finished;
         Job(IGrid grid,RoutePolicy<AEKey> policy,HolderLookup.Provider registries,AEKey key,long amount,ProductionPlanner.Limits limits,BooleanSupplier valid) {
@@ -132,7 +139,7 @@ public final class RoutePlanningService {
                 if(!valid.getAsBoolean()) {result.cancel(true);return;}
                 RouteCanvasPlanner.check(deadline);
                 if(worker==null) {
-                    if(gridRef!=null) {
+                    if(gridRef!=null && stockReplans==0) {
                         var cached=reuse(gridRef,policy,key,amount);
                         if(cached!=null) {
                             phase=Phase.VALIDATION;long validationStart=System.nanoTime();
@@ -154,14 +161,15 @@ public final class RoutePlanningService {
                     }
                     long captureStart=System.nanoTime();RouteSnapshot.Result frozen;
                     try {frozen=capture().result();} finally {captureNanos+=System.nanoTime()-captureStart;}
+                    var avoidStock=Set.copyOf(unstableStock);
                     workerSubmittedAt=System.nanoTime();phase=Phase.WORKER_QUEUE;
                     try {
                         worker=executor.submit(()->{
                             workerStartedAt=System.nanoTime();
                             try {
-                                long remaining=RouteCanvasPlanner.remaining(deadline);
+                                RouteCanvasPlanner.check(deadline);
                                 phase=Phase.WORKER_COMPUTE;
-                                plan=planFrozen(frozen,policy,key,amount,new ProductionPlanner.Limits(states,remaining));
+                                plan=planFrozenAvoidingUnstable(frozen,policy,key,amount,states,deadline,avoidStock);
                             } catch(Throwable failure) {error=failure;errorPhase=phase;} finally {workerFinishedAt=System.nanoTime();finished=true;}
                         });
                     } catch(RejectedExecutionException full) {throw new ProductionPlanningException(LIMIT,"规划工作队列已满；不是缺料");}
@@ -172,7 +180,22 @@ public final class RoutePlanningService {
                     // validate across ticks then claim the early keys are still current.
                     long validationEnd=Math.min(deadline,System.nanoTime()+SLICE_NANOS);
                     phase=Phase.VALIDATION;long validationStart=System.nanoTime();
-                    try {capture().validate(deadline,validationEnd,plan);} finally {validationNanos+=System.nanoTime()-validationStart;}
+                    try {capture().validate(deadline,validationEnd,plan);}
+                    catch(ProductionPlanningException changed) {
+                        if(changed.stockDeficit()==null || stockReplans>=MAX_STOCK_REPLANS)throw changed;
+                        RouteCanvasPlanner.check(deadline);
+                        if(!valid.getAsBoolean()){result.cancel(true);return;}
+                        if(!capture().refresh(key))throw changed;
+                        var deficit=changed.stockDeficit();unstableStock.add(deficit.key());stockReplans++;
+                        CraftRouteAddon.LOGGER.info("[AE-Craftroute] startup stock changed; recapturing target={} amount={} key={} needed={} available={} retry={}/{}",
+                                key,amount,deficit.key(),deficit.needed(),deficit.available(),stockReplans,MAX_STOCK_REPLANS);
+                        if(gridRef!=null)forget(gridRef,policy,key,amount);
+                        priorQueueNanos+=Math.max(0,workerStartedAt-workerSubmittedAt);
+                        priorComputeNanos+=Math.max(0,workerFinishedAt-workerStartedAt);
+                        worker=null;plan=null;error=null;errorPhase=null;finished=false;
+                        workerSubmittedAt=workerStartedAt=workerFinishedAt=0;phase=Phase.CAPTURE;
+                        return;
+                    } finally {validationNanos+=System.nanoTime()-validationStart;}
                     if(!valid.getAsBoolean()) {result.cancel(true);return;}
                     RouteCanvasPlanner.check(deadline);phase=Phase.COMPLETE;
                     if(gridRef!=null) remember(gridRef,policy,key,amount,plan);
@@ -197,8 +220,8 @@ public final class RoutePlanningService {
             long now=System.nanoTime(),submitted=workerSubmittedAt,started=workerStartedAt,finishedAt=workerFinishedAt;
             double captureActiveMs=captureNanos/1_000_000.0;
             double captureWallMs=((submitted==0?now:submitted)-createdAt)/1_000_000.0;
-            double queueMs=submitted==0?0:(started==0?now:started)-submitted;
-            double computeMs=started==0?0:(finishedAt==0?now:finishedAt)-started;
+            double queueMs=priorQueueNanos+(submitted==0?0:(started==0?now:started)-submitted);
+            double computeMs=priorComputeNanos+(started==0?0:(finishedAt==0?now:finishedAt)-started);
             double validationMs=validationNanos/1_000_000.0,totalMs=(now-createdAt)/1_000_000.0;
             String outcome=result.isCompletedExceptionally()?"failed":"slow";
             Throwable cause=error;
@@ -229,6 +252,27 @@ public final class RoutePlanningService {
             AEKey key,long amount,ProductionPlanner.Limits limits) {
         if(policy.canvas()!=null)return RouteCanvasPlanner.plan(snapshot,policy.canvas(),key,amount,limits);
         return NetworkProductionPlanner.plan(key,amount,k->snapshot.patterns().getOrDefault(k,List.of()),k->snapshot.stock().getOrDefault(k,0L),limits);
+    }
+    /** A recaptured plan may prefer producing known-volatile intermediates instead
+     * of borrowing their moving stock. The conservative candidate is independently
+     * certified. Failure MUST fall back to the actual snapshot: masking stock is
+     * not evidence of real missing material, absent seeds or an impossible route. */
+    static CertifiedCraftingPlan planFrozenAvoidingUnstable(RouteSnapshot.Result snapshot,RoutePolicy<AEKey> policy,
+            AEKey key,long amount,int states,long deadline,Set<AEKey> unstable) {
+        var conservative=new LinkedHashMap<>(snapshot.stock());boolean changed=false;
+        for(var k:unstable)if(conservative.getOrDefault(k,0L)>0 && !snapshot.patterns().getOrDefault(k,List.of()).isEmpty()) {
+            conservative.put(k,0L);changed=true;
+        }
+        if(changed) {
+            long allowance=Math.min(200_000_000L,RouteCanvasPlanner.remaining(deadline)/3);
+            if(allowance>0)try {
+                return planFrozen(new RouteSnapshot.Result(snapshot.patterns(),conservative,snapshot.identities()),policy,key,amount,
+                        new ProductionPlanner.Limits(states,allowance));
+            } catch(ProductionPlanningException rejected) {
+                if(rejected.reason()!=UNREACHABLE && rejected.reason()!=UNSUPPORTED && rejected.reason()!=LIMIT)throw rejected;
+            }
+        }
+        return planFrozen(snapshot,policy,key,amount,new ProductionPlanner.Limits(states,RouteCanvasPlanner.remaining(deadline)));
     }
     @SubscribeEvent public static void tick(ServerTickEvent.Post event) {
         tickJobs(JOBS,System.nanoTime()+TICK_NANOS);WORKERS.purge();

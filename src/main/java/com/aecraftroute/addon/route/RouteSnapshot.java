@@ -83,6 +83,8 @@ public final class RouteSnapshot {
             }
         }
         public Result result() { if(result==null)throw new IllegalStateException("Capture incomplete");return result; }
+        /** Fresh traversal and stock capture, with the ORIGINAL request deadline. */
+        public Capture refreshed(AEKey target) {return new Capture(grid,policy,registries,target,deadline);}
         /** Revalidation runs on server ticks before an apply commit. */
         public Iterator<Map.Entry<AEKey,List<IPatternDetails>>> validation() {return observed.entrySet().iterator();}
         public appeng.api.stacks.KeyCounter liveInventory() {return grid.getStorageService().getInventory().getAvailableStacks();}

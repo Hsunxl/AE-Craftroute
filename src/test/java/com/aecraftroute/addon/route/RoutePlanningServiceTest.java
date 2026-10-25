@@ -226,10 +226,105 @@ class RoutePlanningServiceTest {
     @Test void missingRequiredStartupCapitalStillRejectsThePlanBeforeSubmit() throws Exception {
         var stock=new HashMap<BenchAEKey,Long>();stock.put(ore,1L);
         var job=liveJob(stock);tick(job);finishWorker(job);stock.put(ore,0L);tick(job);
+        assertEquals(1,job.stockReplans);assertFalse(job.result.isDone());assertNull(job.plan);
+        tick(job);finishWorker(job);tick(job);
         var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
         var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
-        assertEquals(ProductionPlanningException.Reason.INVALID,failure.reason());
-        assertTrue(failure.getMessage().contains("起手材料"));
+        assertEquals(ProductionPlanningException.Reason.UNREACHABLE,failure.reason());
+        assertNull(RoutePlanningService.reuse(job.gridRef,policy,target,1));
+    }
+    @Test void movingCraftableStockIsRecapturedAndProducedFromUpstreamBeforeCommit() throws Exception {
+        var mid=BenchAEKey.of("moving_mid");
+        var make=new BenchPatternDetails(mid,1,List.of(of(ore,1)));
+        var finish=new BenchPatternDetails(target,1,List.of(of(mid,2)));
+        var stock=new HashMap<>(Map.of(ore,100L,mid,2L));
+        var job=liveJob(stock,new HashMap<>(Map.of(target,List.of(finish),mid,List.of(make))));
+        tick(job);finishWorker(job);assertEquals(2,job.plan.usedItems().get(mid));
+        long originalDeadline=job.deadline;var stale=job.plan;
+        stock.put(mid,1L);tick(job);
+        assertFalse(job.result.isDone());assertEquals(1,job.stockReplans);assertNull(job.plan);
+        tick(job);finishWorker(job);
+        assertEquals(0,job.plan.usedItems().get(mid));assertEquals(2,job.plan.usedItems().get(ore));
+        stock.put(mid,0L);tick(job);var fresh=job.result.get(1,TimeUnit.SECONDS);
+        assertNotSame(stale,fresh);assertEquals(originalDeadline,job.deadline);
+        assertEquals(100,stock.get(ore)); // planning/retry never reserves or extracts items
+        assertSame(fresh,RoutePlanningService.reuse(job.gridRef,policy,target,1));
+    }
+    @Test void twoDifferentMovingIntermediatesAreAvoidedWithoutMaskingStableRawStock() throws Exception {
+        var mid=BenchAEKey.of("moving_middle");var lower=BenchAEKey.of("moving_lower");
+        var stock=new HashMap<>(Map.of(ore,100L,lower,2L,mid,1L));
+        var patterns=new HashMap<AEKey,List<IPatternDetails>>(Map.of(
+                target,List.of(new BenchPatternDetails(target,1,List.of(of(mid,1)))),
+                mid,List.of(new BenchPatternDetails(mid,1,List.of(of(lower,2)))),
+                lower,List.of(new BenchPatternDetails(lower,1,List.of(of(ore,1))))));
+        var job=liveJob(stock,patterns);tick(job);finishWorker(job);stock.put(mid,0L);tick(job);
+        tick(job);finishWorker(job);assertEquals(2,job.plan.usedItems().get(lower));
+        stock.put(lower,1L);tick(job);assertEquals(2,job.stockReplans);
+        tick(job);finishWorker(job);stock.put(lower,0L);tick(job);
+        var plan=job.result.get(1,TimeUnit.SECONDS);assertEquals(2,plan.usedItems().get(ore));
+        assertEquals(0,plan.usedItems().get(mid));assertEquals(0,plan.usedItems().get(lower));
+    }
+    @Test void conservativeMaskFailureFallsBackToRealStockInsteadOfClaimingMissingMaterials() {
+        var mid=BenchAEKey.of("only_available_mid");
+        var snapshot=new RouteSnapshot.Result(Map.of(target,List.of(new BenchPatternDetails(target,1,List.of(of(mid,2)))),
+                mid,List.of(new BenchPatternDetails(mid,1,List.of(of(ore,1))))),Map.of(mid,2L));
+        var plan=RoutePlanningService.planFrozenAvoidingUnstable(snapshot,policy,target,1,6000,System.nanoTime()+5_000_000_000L,Set.of(mid));
+        assertEquals(2,plan.usedItems().get(mid));assertEquals(0,plan.usedItems().get(ore));
+    }
+    @Test void aReturnedSeedIsNotInventedOrLostWhenConservativeMaskHasNoBootstrap() {
+        var feed=BenchAEKey.of("seed_feed");
+        var grow=new BenchPatternDetails(target,2,List.of(of(target,1),of(feed,1)));
+        var snapshot=new RouteSnapshot.Result(Map.of(target,List.of(grow)),Map.of(target,1L,feed,1L));
+        var plan=RoutePlanningService.planFrozenAvoidingUnstable(snapshot,policy,target,1,6000,System.nanoTime()+5_000_000_000L,Set.of(target));
+        assertEquals(1,plan.usedItems().get(target));assertEquals(1,plan.usedItems().get(feed));
+    }
+    @Test void continuouslyChangingStockHasABoundedRetryCountAndDetailedFinalDeficit() throws Exception {
+        var mid=BenchAEKey.of("unstable_without_raw");var stock=new HashMap<>(Map.of(mid,2L));
+        var patterns=new HashMap<AEKey,List<IPatternDetails>>(Map.of(
+                target,List.of(new BenchPatternDetails(target,1,List.of(of(mid,2)))),
+                mid,List.of(new BenchPatternDetails(mid,1,List.of(of(ore,1))))));
+        var job=liveJob(stock,patterns);long deadline=job.deadline;
+        for(int attempt=0;attempt<3;attempt++) {
+            stock.put(mid,2L);tick(job);finishWorker(job);stock.put(mid,1L);tick(job);
+            assertEquals(deadline,job.deadline);
+            if(attempt<2)assertFalse(job.result.isDone());
+        }
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
+        assertEquals(ProductionPlanningException.Reason.INVALID,failure.reason());assertEquals(2,job.stockReplans);
+        assertEquals(mid,failure.stockDeficit().key());assertEquals(2,failure.stockDeficit().needed());assertEquals(1,failure.stockDeficit().available());
+        assertTrue(failure.getMessage().contains("需要 2"));assertTrue(failure.getMessage().contains("当前 1"));
+        assertNull(RoutePlanningService.reuse(job.gridRef,policy,target,1));
+    }
+    @Test void closureOrStopBetweenRecaptureAndRetryCannotCommitAnOldPlan() throws Exception {
+        for(boolean stop:new boolean[]{false,true}) {
+            var valid=new AtomicBoolean(true);var refreshes=new AtomicInteger();
+            RoutePlanningService.CaptureWork source=new RoutePlanningService.CaptureWork() {
+                public boolean advance(){return true;}
+                public RouteSnapshot.Result result(){return new RouteSnapshot.Result(Map.of(target,List.of(plain)),Map.of(ore,1L));}
+                public void validate(long d,long v,CertifiedCraftingPlan p){throw ProductionPlanningException.startupStockChanged(ore,1,0);}
+                public boolean refresh(AEKey key){refreshes.incrementAndGet();return true;}
+            };
+            var job=new RoutePlanningService.Job(policy,target,1,limits,valid::get,workers,source);
+            tick(job);finishWorker(job);tick(job);assertEquals(1,refreshes.get());assertNull(job.worker);
+            if(stop)RoutePlanningService.cancelJobs(new ArrayList<>(List.of(job)));else{valid.set(false);tick(job);}
+            assertTrue(job.result.isCancelled());assertNull(job.worker);
+        }
+    }
+    @Test void recaptureDoesNotRestartTheOriginalEndToEndDeadline() throws Exception {
+        var refreshes=new AtomicInteger();
+        RoutePlanningService.CaptureWork source=new RoutePlanningService.CaptureWork() {
+            public boolean advance(){return true;}
+            public RouteSnapshot.Result result(){return new RouteSnapshot.Result(Map.of(target,List.of(plain)),Map.of(ore,1L));}
+            public void validate(long d,long v,CertifiedCraftingPlan p){throw ProductionPlanningException.startupStockChanged(ore,1,0);}
+            public boolean refresh(AEKey key){refreshes.incrementAndGet();return true;}
+        };
+        var job=new RoutePlanningService.Job(policy,target,1,new ProductionPlanner.Limits(6000,500_000_000L),()->true,workers,source);
+        long deadline=job.deadline;tick(job);finishWorker(job);tick(job);assertEquals(1,refreshes.get());
+        Thread.sleep(510);tick(job);
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        assertEquals(ProductionPlanningException.Reason.LIMIT,((ProductionPlanningException)error.getCause()).reason());
+        assertEquals(deadline,job.deadline);assertEquals(1,refreshes.get());assertNull(job.worker);
     }
     private CertifiedCraftingPlan complete(RoutePlanningService.Job job) throws Exception {
         tick(job);finishWorker(job);tick(job);return job.result.get(1,TimeUnit.SECONDS);

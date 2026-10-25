@@ -233,6 +233,10 @@ public final class SelftestHarness {
         private final boolean restart2;
         private final boolean partial;
         private final boolean paths;
+        private final boolean stockRace;
+        private Object stockRaceJob;
+        private boolean stockRaceDrained;
+        private long stockRaceDeadline;
         private CpuTaskObserver pathObserver;
         private IPatternDetails pathDiamondLapis,pathEmeraldLapis;
         private Requester requester;
@@ -255,11 +259,12 @@ public final class SelftestHarness {
         Scenario(MinecraftServer server) {
             this.server = server;
             this.task = System.getProperty(TASK_PROP, "growth");
-            this.advanced = "advanced".equals(this.task) || "advanced-overestimate".equals(this.task);
+            this.advanced = "advanced".equals(this.task) || "advanced-overestimate".equals(this.task) || "advanced-stock-race".equals(this.task);
             this.restart1 = "restart1".equals(this.task);
             this.restart2 = "restart2".equals(this.task);
             this.partial = "partial".equals(this.task) || this.task.endsWith("overestimate");
             this.paths = "paths".equals(this.task);
+            this.stockRace=this.task.endsWith("stock-race");
             // Opt this harness in exactly like a cooperating mod would; unregistered
             // third-party requesters are deliberately left on the native path.
             com.aecraftroute.addon.api.CraftRouteCraftingRegistry.register(Requester.class.getName());
@@ -650,6 +655,7 @@ public final class SelftestHarness {
                 submitPathCalculation();
                 return;
             }
+            if(stockRace){submitStockRaceCalculation();return;}
 
             // Exercise the canvas preview path on the live grid: same snapshot builder,
             // same planner, short budget. This is what the route screen will call.
@@ -732,8 +738,59 @@ public final class SelftestHarness {
             finish();
         }
 
+        private Object stockRaceField(String name) throws ReflectiveOperationException {
+            var field=stockRaceJob.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(stockRaceJob);
+        }
+        @SuppressWarnings("unchecked")
+        private void submitStockRaceCalculation() {
+            try {
+                var lapis=AEItemKey.of(Items.LAPIS_LAZULI);
+                if(inventory().insert(lapis,4,Actionable.MODULATE,IActionSource.empty())!=4)
+                    throw new IllegalStateException("cannot seed moving intermediate");
+                var type=Class.forName("com.aecraftroute.addon.route.RoutePlanningService$Job");
+                var ctor=type.getDeclaredConstructor(IGrid.class,com.aecraftroute.addon.route.RoutePolicy.class,
+                        net.minecraft.core.HolderLookup.Provider.class,AEKey.class,long.class,
+                        com.aecraftroute.addon.planner.ProductionPlanner.Limits.class,java.util.function.BooleanSupplier.class);
+                ctor.setAccessible(true);
+                stockRaceJob=ctor.newInstance(grid,new com.aecraftroute.addon.route.RoutePolicy<AEKey>(java.util.Map.of()),
+                        level.registryAccess(),AEItemKey.of(Items.DIAMOND),requested,
+                        new com.aecraftroute.addon.planner.ProductionPlanner.Limits(6000,5_000_000_000L),
+                        (java.util.function.BooleanSupplier)()->!finished);
+                stockRaceDeadline=(long)stockRaceField("deadline");
+                pendingCalculation=(java.util.concurrent.Future<ICraftingPlan>)stockRaceField("result");
+                phase=Phase.CALCULATING;phaseTicks=0;
+            } catch(ReflectiveOperationException failure){throw new IllegalStateException(failure);}
+        }
+        /** Drives the REAL production Job and LiveCapture, but outside the global
+         * tick queue so this isolated harness can deterministically remove actual
+         * ME stock between worker completion and server-thread validation. */
+        private void tickStockRace() {
+            try {
+                if(!stockRaceDrained && (boolean)stockRaceField("finished") && stockRaceField("plan")!=null) {
+                    var before=(CertifiedCraftingPlan)stockRaceField("plan");var lapis=AEItemKey.of(Items.LAPIS_LAZULI);
+                    long needed=before.usedItems().get(lapis);
+                    if(needed<=0)throw new IllegalStateException("race fixture did not borrow intermediate stock");
+                    long removed=inventory().extract(lapis,Long.MAX_VALUE,Actionable.MODULATE,IActionSource.empty());
+                    if(removed<needed)throw new IllegalStateException("race fixture did not actually drain its required stock");
+                    stockRaceDrained=true;
+                    LOG.info("[SELFTEST] drained actual ME intermediate before validation: needed={} removed={}",needed,removed);
+                }
+                var tick=stockRaceJob.getClass().getDeclaredMethod("tick",long.class);tick.setAccessible(true);
+                tick.invoke(stockRaceJob,System.nanoTime()+2_000_000L);
+                if((long)stockRaceField("deadline")!=stockRaceDeadline)throw new IllegalStateException("retry extended request deadline");
+                if(pendingCalculation.isDone() && !pendingCalculation.isCancelled()) {
+                    if(!stockRaceDrained || (int)stockRaceField("stockReplans")!=1)
+                        throw new IllegalStateException("real live-stock retry was not exercised exactly once");
+                    var after=(CertifiedCraftingPlan)stockRaceField("plan");
+                    if(after==null || after.usedItems().get(AEItemKey.of(Items.LAPIS_LAZULI))!=0)
+                        throw new IllegalStateException("retry still borrowed the drained intermediate");
+                    LOG.info("[SELFTEST] fresh upstream plan validated; original deadline retained; retries=1");
+                }
+            } catch(ReflectiveOperationException failure){throw new IllegalStateException(failure);}
+        }
         /** Never blocks the server thread: AE2's own callers consume futures asynchronously. */
         private void calculating() {
+            if(stockRace)tickStockRace();
             if (pendingCalculation.isDone()) {
                 ICraftingPlan calculated;
                 try {
@@ -1214,6 +1271,7 @@ public final class SelftestHarness {
                 return;
             }
             finished = true;
+            if(stockRace && pendingCalculation!=null && !pendingCalculation.isDone())pendingCalculation.cancel(true);
             if (failures.isEmpty()) {
                 LOG.info("[SELFTEST] RESULT=PASS task={} ticks={}", task, ticks);
             } else {
