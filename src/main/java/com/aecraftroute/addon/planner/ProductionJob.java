@@ -33,6 +33,16 @@ public final class ProductionJob {
     public ProductionJob(CertifiedCraftingPlan plan) { this(new ProductionCursor<>(plan.program()),false); }
     private ProductionJob(ProductionCursor<PatternVariant> cursor,boolean invalid) { this.cursor=cursor; this.invalid=invalid; }
     public boolean done() { return !invalid && cursor.done(); }
+    /** Delivery may start once the program is finished AND no expected return of the
+     * target itself is still in flight. Returns of any other key - byproducts, catalysts
+     * the machine consumed, containers a provider voided - must NOT be waited for: a
+     * single return that never arrives would otherwise pin the CPU forever. Those
+     * leftovers simply stay in the CPU inventory and native storeItems returns them to
+     * the network when the job ends.
+     */
+    public boolean readyToDeliver(KeyCounter waitingFor,AEKey target) {
+        return target!=null && done() && waitingFor.get(target)==0L;
+    }
     /** Native tasks and the certified cursor must describe the same future work.
      * waitingFor may still contain outputs from already accepted dispatches. */
     public boolean validateRemainingTasks(Map<IPatternDetails,Long> tasks) {

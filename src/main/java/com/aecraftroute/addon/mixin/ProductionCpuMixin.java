@@ -85,13 +85,17 @@ public abstract class ProductionCpuMixin {
         if(aecraftroute$production==null || job==null || !aecraftroute$production.done()) return;
         var access=(GrowthJobAccessor)(Object)job;
         if(access.aecraftroute$getLink().isCanceled() || access.aecraftroute$getSuspended() || !cluster.isActive()) return;
-        if(!access.aecraftroute$getWaitingFor().list.isEmpty()) {
-            if(aecraftroute$deliveryLogs.acquireDelayed("waiting"))
-                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery waiting for {} output keys from accepted dispatches",access.aecraftroute$getWaitingFor().list.size());
-            return;
-        }
         long remaining=access.aecraftroute$getRemainingAmount();
         AEKey key=access.aecraftroute$getFinalOutput().what();
+        // Only the target's own outstanding returns may delay delivery. A byproduct or a
+        // catalyst the machine voided would otherwise pin this CPU forever; leftovers are
+        // stored back by native storeItems when the job ends.
+        if(!aecraftroute$production.readyToDeliver(access.aecraftroute$getWaitingFor().list,key)) {
+            if(aecraftroute$deliveryLogs.acquireDelayed("waiting"))
+                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery waiting for the last {} x{} from accepted dispatches",
+                        key,access.aecraftroute$getWaitingFor().list.get(key));
+            return;
+        }
         long held=inventory.extract(key,remaining,Actionable.SIMULATE);
         if(held<=0) {
             if(aecraftroute$deliveryLogs.acquire("missing"))
