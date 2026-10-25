@@ -131,10 +131,12 @@ public final class ProductionPlanner<K, R> {
     private Probe probe(int target, BigInteger[] goal, long increment) {
         var result=new Probe();
         if(limits.states<64) return result;
-        long allowance=Math.min(50_000_000L,limits.nanos/16);
+        long allowance=Math.min(200_000_000L,limits.nanos/8);
         // Leave longer witnesses to backward search, which can prove repeated
         // words as macros instead of retaining a large heuristic straight line.
-        int batches=Math.min(64,limits.states/8);
+        // Aggregation passes (below) converge in O(chain depth) passes, so the cap
+        // only bounds pathological cyclic nets, not ordinary large quantities.
+        int batches=Math.min(4096,Math.max(64,limits.states/4));
         var distances=new int[keys.size()]; Arrays.fill(distances,Integer.MAX_VALUE);
         var recipeDistances=new int[recipes.size()]; Arrays.fill(recipeDistances,Integer.MAX_VALUE);
         var keyOrder=new ArrayList<Integer>();
@@ -196,11 +198,12 @@ public final class ProductionPlanner<K, R> {
             if(recipeDistances[r]!=Integer.MAX_VALUE) candidates.add(r);
         }
         candidates.sort(Comparator.comparingInt((Integer r)->recipeDistances[r]).thenComparingInt(r->r));
-        var actual=new long[stock.length]; var word=new ArrayList<Step<R>>();
+        var actual=new long[stock.length];
         for(int k=0;k<stock.length;k++) {
             if(probeExpired(allowance)) return result;
             actual[k]=stock[k].longValueExact();
         }
+        var blocks=new ArrayList<Block<R>>();
         while(result.explored<batches) {
             if(probeExpired(allowance)) return result;
             if(BigInteger.valueOf(actual[target]).compareTo(goal[target])>=0) break;
@@ -223,9 +226,13 @@ public final class ProductionPlanner<K, R> {
                 }
             }
             boolean progress=false;
+            var pass=new ArrayList<Step<R>>();
             // Re-scan near-target producers first after every actual batch. An
             // executable recipe is useful only for a positive net hint deficit.
-            for(int r:candidates) {
+            // Deepest upstream first: a pass must build intermediates before the
+            // recipes that consume them can execute against the same inventory.
+            for(int ci=candidates.size()-1;ci>=0;ci--) {
+                int r=candidates.get(ci);
                 if(probeExpired(allowance)) return result;
                 var d=delta(r); BigInteger count=ZERO;
                 for(int k:outputIndices[r]) {
@@ -246,16 +253,60 @@ public final class ProductionPlanner<K, R> {
                 if(probeExpired(allowance)) return result;
                 actual=execution.inventory();
                 var step=execution.step();
-                word.add(new Step<>(recipes.get(step.recipe()).id,step.count()));
+                pass.add(new Step<>(recipes.get(step.recipe()).id,step.count()));
                 result.explored++; progress=true; break;
             }
             if(!progress) return result;
+            if(!pass.isEmpty()) blocks.add(new Block<>(List.copyOf(pass),1));
+            // Steady-state detection: when the last two windows of singleton blocks are
+            // identical, the ring has settled. Jump the remaining cycles arithmetically
+            // (capture-aggregate, upstream AE2-VM style) instead of executing thousands
+            // of passes; certify() replays the macro and remains the only proof gate.
+            int m=blocks.size();
+            for(int p=1;p<=8 && m>=2*p;p++) {
+                boolean single=true;
+                for(int i=m-2*p;i<m;i++) if(blocks.get(i).repetitions()!=1) {single=false;break;}
+                if(!single) continue;
+                boolean equal=true;
+                for(int i=0;i<p;i++) if(!blocks.get(m-p+i).equals(blocks.get(m-2*p+i))) {equal=false;break;}
+                if(!equal) continue;
+                var word=new ArrayList<Step<R>>();
+                for(int i=m-p;i<m;i++) word.addAll(blocks.get(i).word());
+                var summary=summarize(word);var required=summary[0];var net=summary[1];var peak=summary[2];
+                if(net[target].signum()<=0) continue;
+                var remaining=goal[target].subtract(BigInteger.valueOf(actual[target]));
+                if(remaining.signum()<=0) break;
+                var cycles=remaining.add(net[target]).subtract(ONE).divide(net[target]);
+                boolean feasible=true;
+                for(int k=0;k<keys.size();k++) {
+                    var held=BigInteger.valueOf(actual[k]);
+                    // Net consumption is not enough: the last round must still have
+                    // its prefix working capital, even if that capital is returned.
+                    if(held.compareTo(required[k])<0 || held.add(peak[k]).compareTo(MAX_COUNT)>0) {feasible=false;break;}
+                    if(net[k].signum()<0) cycles=cycles.min(held.subtract(required[k]).divide(net[k].negate()).add(ONE));
+                    if(net[k].signum()>0) cycles=cycles.min(MAX_COUNT.subtract(held).subtract(peak[k]).divide(net[k]).add(ONE));
+                }
+                if(cycles.signum()<=0) { feasible=false; }
+                if(!feasible) continue;
+                if(cycles.compareTo(MAX_COUNT)>0) cycles=MAX_COUNT;
+                try {
+                    for(int k=0;k<keys.size();k++)
+                        actual[k]=BigInteger.valueOf(actual[k]).add(net[k].multiply(cycles)).longValueExact();
+                } catch(ArithmeticException overflow) { return result; }
+                blocks.add(new Block<>(List.copyOf(word),cycles.longValueExact()));
+                result.explored++;
+                break;
+            }
         }
         if(BigInteger.valueOf(actual[target]).compareTo(goal[target])<0 || probeExpired(allowance)) return result;
+        if(blocks.isEmpty()) return result;
+        // Prefix blocks may repeat recipes (bootstrap of a ring); certify() proves the
+        // witness either way. Only unbounded bloat is refused here.
+        if(blocks.size()>512) return result;
         Node witness=new Node(goal,null,null);
-        for(int i=word.size()-1;i>=0;i--) {
+        for(int i=blocks.size()-1;i>=0;i--) {
             if(probeExpired(allowance)) return result;
-            witness=new Node(goal,witness,new Block<>(List.of(word.get(i)),1));
+            witness=new Node(goal,witness,blocks.get(i));
         }
         // The same independent prefix-capital and forward-replay proof used by
         // backward search is mandatory. Only its FEASIBLE answer may shortcut it.
@@ -274,7 +325,9 @@ public final class ProductionPlanner<K, R> {
         var queue=new PriorityQueue<Node>(Comparator.comparingDouble((Node n)->n.score).thenComparingLong(n->n.order));
         var basis=new ArrayList<Node>();
         Node root=new Node(goal,null,null); queue.add(root); fair.add(root); basis.add(root);
-        int explored=attempt.explored;
+        // The probe has its own time allowance; never let its step count starve the
+        // backward search of its state budget when the probe could not certify.
+        int explored=Math.min(attempt.explored,limits.states/2);
         while(!queue.isEmpty()) {
             if(expired() || explored>=limits.states) return failure(Status.LIMIT,explored);
             // Interleave breadth-first work so a tempting huge batch cannot starve

@@ -61,6 +61,14 @@ public final class ProductionJob {
         com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Native tasks disagree with production cursor; cancel and resubmit. No inventory mutation.");
         return false;
     }
+    /** Execution position, for stall diagnostics: unchanged means nothing dispatched. */
+    public ProductionCursor.Position position() { return cursor.position(); }
+    /** Undispatched counts merged by pattern, for stall diagnostics. */
+    public Map<IPatternDetails,Long> remainingCounts() {
+        var merged=new HashMap<IPatternDetails,Long>();
+        cursor.remainingCounts().forEach((variant,count)->merged.merge(variant.pattern(),count,Math::addExact));
+        return merged;
+    }
     public boolean allows(IPatternDetails p) { return !invalid && cursor.current()!=null && cursor.current().pattern().equals(p); }
     public void accepted(IPatternDetails p) {
         if(!allows(p)) throw new IllegalStateException("Uncertified dispatch");

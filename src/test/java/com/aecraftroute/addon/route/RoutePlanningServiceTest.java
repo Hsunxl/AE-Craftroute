@@ -24,7 +24,7 @@ class RoutePlanningServiceTest {
     final RoutePolicy<AEKey> policy=new RoutePolicy<>(Map.of());
     final ProductionPlanner.Limits limits=new ProductionPlanner.Limits(6000,5_000_000_000L);
     final AtomicInteger captures=new AtomicInteger(),validations=new AtomicInteger(),commits=new AtomicInteger();
-    @AfterEach void close() throws Exception {workers.shutdownNow();assertTrue(workers.awaitTermination(3,TimeUnit.SECONDS));}
+    @AfterEach void close() throws Exception {RoutePlanningService.clearReuse();workers.shutdownNow();assertTrue(workers.awaitTermination(3,TimeUnit.SECONDS));}
     RoutePlanningService.CaptureWork capture(IPatternDetails pattern,boolean changed) {
         return new RoutePlanningService.CaptureWork() {
             int calls;
@@ -195,9 +195,12 @@ class RoutePlanningServiceTest {
     }
 
     private RoutePlanningService.Job liveJob(Map<BenchAEKey,Long> stock) {
+        return liveJob(stock,new HashMap<>(Map.of(target,List.of(plain))));
+    }
+    private RoutePlanningService.Job liveJob(Map<BenchAEKey,Long> stock,Map<AEKey,List<IPatternDetails>> patterns) {
         ICraftingService crafting=(ICraftingService)Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class[]{ICraftingService.class},(proxy,method,args)->{
-                    if(method.getName().equals("getCraftingFor"))return args[0]==target?List.of(plain):List.of();
+                    if(method.getName().equals("getCraftingFor"))return patterns.getOrDefault(args[0],List.of());
                     if(method.getName().equals("hashCode"))return System.identityHashCode(proxy);
                     if(method.getName().equals("equals"))return proxy==args[0];
                     if(method.getName().equals("toString"))return "live-test-crafting";
@@ -208,6 +211,8 @@ class RoutePlanningServiceTest {
         var base=new FakeBenchGrid(stock);
         IGrid grid=(IGrid)Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{IGrid.class},(proxy,method,args)->{
             if(method.getName().equals("getCraftingService"))return crafting;
+            if(method.getName().equals("hashCode"))return System.identityHashCode(proxy);
+            if(method.getName().equals("equals"))return proxy==args[0];
             return method.invoke(base,args);
         });
         return new RoutePlanningService.Job(grid,policy,null,target,1,limits,()->true);
@@ -225,5 +230,61 @@ class RoutePlanningServiceTest {
         var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
         assertEquals(ProductionPlanningException.Reason.INVALID,failure.reason());
         assertTrue(failure.getMessage().contains("起手材料"));
+    }
+    private CertifiedCraftingPlan complete(RoutePlanningService.Job job) throws Exception {
+        tick(job);finishWorker(job);tick(job);return job.result.get(1,TimeUnit.SECONDS);
+    }
+    private RoutePlanningService.Job repeat(RoutePlanningService.Job first) {
+        return new RoutePlanningService.Job(first.gridRef,policy,null,target,1,limits,()->true);
+    }
+    @Test void repeatedRequestReusesCertifiedProgramWithoutStartingWorker() throws Exception {
+        var first=liveJob(new HashMap<>(Map.of(ore,2L)));var plan=complete(first);
+        var again=repeat(first);tick(again);
+        assertSame(plan,again.result.get(1,TimeUnit.SECONDS));assertNull(again.worker);
+    }
+    @Test void insufficientLeafStockFallsBackToCaptureInsteadOfReusingPlan() throws Exception {
+        var stock=new HashMap<>(Map.of(ore,1L));var first=liveJob(stock);complete(first);
+        stock.put(ore,0L);var again=repeat(first);tick(again);
+        assertNotNull(again.worker);assertFalse(again.result.isDone());
+        assertNull(RoutePlanningService.reuse(first.gridRef,policy,target,1));
+    }
+    @Test void newlyCraftableStartupCapitalRejectsFastPath() throws Exception {
+        var patterns=new HashMap<AEKey,List<IPatternDetails>>(Map.of(target,List.of(plain)));
+        var first=liveJob(new HashMap<>(Map.of(ore,1L)),patterns);var plan=complete(first);
+        patterns.put(ore,List.of(new BenchPatternDetails(ore,1,List.of(of(target,1)))));
+        assertFalse(RoutePlanningService.stillExecutable(first.gridRef,plan,Long.MAX_VALUE));
+        var again=repeat(first);tick(again);assertNotNull(again.worker);
+    }
+    @Test void removedOrReplacedPatternRejectsCachedProgram() throws Exception {
+        var patterns=new HashMap<AEKey,List<IPatternDetails>>(Map.of(target,List.of(plain)));
+        var first=liveJob(new HashMap<>(Map.of(ore,1L)),patterns);var plan=complete(first);
+        patterns.remove(target);
+        assertFalse(RoutePlanningService.stillExecutable(first.gridRef,plan,Long.MAX_VALUE));
+        patterns.put(target,List.of(new BenchPatternDetails(target,1,List.of(of(ore,1)))));
+        assertFalse(RoutePlanningService.stillExecutable(first.gridRef,plan,Long.MAX_VALUE));
+    }
+    @Test void expiredFastPathSliceFallsBackWithoutAcceptingCachedPlan() throws Exception {
+        var first=liveJob(new HashMap<>(Map.of(ore,1L)));var plan=complete(first);
+        assertFalse(RoutePlanningService.stillExecutable(first.gridRef,plan,System.nanoTime()-1));
+        var again=repeat(first);again.tick(System.nanoTime()-1);assertFalse(again.result.isDone());
+        tick(again);finishWorker(again);tick(again);assertNotNull(again.result.get(1,TimeUnit.SECONDS));
+    }
+    @Test void reuseCacheIsBoundedAndEvictsLeastRecentlyUsedRequest() throws Exception {
+        var first=liveJob(new HashMap<>(Map.of(ore,1L)));var plan=complete(first);
+        for(long amount=2;amount<=64;amount++)RoutePlanningService.remember(first.gridRef,policy,target,amount,plan);
+        assertSame(plan,RoutePlanningService.reuse(first.gridRef,policy,target,1));
+        RoutePlanningService.remember(first.gridRef,policy,target,65,plan);
+        assertSame(plan,RoutePlanningService.reuse(first.gridRef,policy,target,1));
+        assertNull(RoutePlanningService.reuse(first.gridRef,policy,target,2));
+        assertSame(plan,RoutePlanningService.reuse(first.gridRef,policy,target,65));
+    }
+    @Test void cacheIsIsolatedByGridPolicyAmountAndClearedOnStop() throws Exception {
+        var first=liveJob(new HashMap<>(Map.of(ore,1L)));complete(first);
+        var other=liveJob(new HashMap<>(Map.of(ore,1L)));
+        assertNull(RoutePlanningService.reuse(other.gridRef,policy,target,1));
+        assertNull(RoutePlanningService.reuse(first.gridRef,policy.change(ore,"stock",""),target,1));
+        assertNull(RoutePlanningService.reuse(first.gridRef,policy,target,2));
+        RoutePlanningService.stopped(null);
+        assertNull(RoutePlanningService.reuse(first.gridRef,policy,target,1));
     }
 }

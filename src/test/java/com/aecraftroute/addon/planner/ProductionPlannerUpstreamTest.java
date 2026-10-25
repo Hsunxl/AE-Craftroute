@@ -18,6 +18,30 @@ class ProductionPlannerUpstreamTest {
         }
     }
 
+    @Test void veryLargeQuantitiesStayCompactAndFeasible() {
+        var recipes=ProductionPlannerUpstreamFixture.recipes();
+        for(long amount:new long[]{47256L,1_000_000L}) {
+            var stock=ProductionPlannerUpstreamFixture.stock(84);
+            var result=new ProductionPlanner<>(recipes,stock,Limits.defaults()).solve("dust",amount);
+            assertEquals(Status.FEASIBLE,result.status(),"amount="+amount+", explored="+result.explored());
+            assertTrue(result.program().size()<100,"program bloated: "+result.program().size());
+            replay(recipes,stock,result,"dust",amount);
+        }
+    }
+    /** Synthetic tiered essence-like graph, not an export of the user's network.
+     * This is deliberately distinct from the dust/seed growth regression. */
+    @Test void largeCatalystTierChainStaysWithinDefaultBudget() {
+        var recipes=new ArrayList<Recipe<String,String>>();
+        for(int tier=1;tier<=4;tier++)recipes.add(new Recipe<>("tier-"+tier,
+                Map.of("tier-"+(tier-1),4L,"catalyst",1L),
+                Map.of("tier-"+tier,1L,"catalyst",1L)));
+        long amount=47256L;
+        var result=new ProductionPlanner<>(recipes,Map.of("tier-0",amount*256,"catalyst",1L),Limits.defaults()).solve("tier-4",amount);
+        assertEquals(Status.FEASIBLE,result.status(),"explored="+result.explored());
+        assertEquals(Map.of("tier-0",amount*256,"catalyst",1L),result.used());
+        assertEquals(Map.of("tier-1",amount*64,"tier-2",amount*16,"tier-3",amount*4,"tier-4",amount),result.counts());
+        assertTrue(result.program().size()<20,"tier graph expanded per item");
+    }
     @Test void producingSideInputsDoesNotInventGrowthCapital() {
         var result=new ProductionPlanner<>(ProductionPlannerUpstreamFixture.recipes(),
                 ProductionPlannerUpstreamFixture.stock(7),new Limits(10_000,250_000_000L)).solve("dust",100);
@@ -35,6 +59,16 @@ class ProductionPlannerUpstreamTest {
                     new Limits(10_000,250_000_000L)).solve("capital",1000);
             assertNotEquals(Status.FEASIBLE,result.status());
         }
+    }
+    @Test void repeatedCycleMustRetainLastRoundsWorkingCapital() {
+        var recipes=List.of(
+                new Recipe<>("spend",Map.of("capital",2L,"feed",1L),Map.of("intermediate",1L)),
+                new Recipe<>("return",Map.of("intermediate",1L),Map.of("capital",1L,"target",1L)));
+        var stock=Map.of("capital",5L,"feed",10L);
+        var feasible=new ProductionPlanner<>(recipes,stock,Limits.defaults()).solve("target",4);
+        assertEquals(Status.FEASIBLE,feasible.status());replay(recipes,stock,feasible,"target",4);
+        var impossible=assertDoesNotThrow(()->new ProductionPlanner<>(recipes,stock,new Limits(1000,100_000_000L)).solve("target",5));
+        assertNotEquals(Status.FEASIBLE,impossible.status());assertTrue(impossible.program().isEmpty());
     }
 
     @Test void overflowCannotBecomeAnExecutableCertificate() {

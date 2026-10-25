@@ -43,6 +43,19 @@ class NetworkProductionPlannerTest {
         var result=plan(List.of(p),Map.of(tool,1L,fuel,20L),target,20);
         assertEquals(1,result.usedItems().get(tool)); execute(result,true);
     }
+    @Test void largeTieredOrderKeepsOneReturnedCatalystThroughActualPatternEnumeration() {
+        // Synthetic essence-like tiers, distinct from the dust growth fixture.
+        var tiers=List.of(a,b,c,fuel,target);var patterns=new ArrayList<IPatternDetails>();
+        for(int i=1;i<tiers.size();i++)patterns.add(new BenchPatternDetails(tiers.get(i),1,
+                List.of(of(tiers.get(i-1),4),returned(tool,1))));
+        long amount=47256;
+        var result=plan(patterns,Map.of(a,amount*256,tool,1L),target,amount);
+        assertEquals(amount*256,result.usedItems().get(a));assertEquals(1,result.usedItems().get(tool));
+        assertEquals(amount,result.finalOutput().amount());assertEquals(4,result.patternTimes().size());
+        long count=amount;
+        for(int i=patterns.size()-1;i>=0;i--) {assertEquals(count,result.patternTimes().get(patterns.get(i)));count*=4;}
+        assertTrue(result.program().size()<20);
+    }
     @Test void alternativesMayBeMixedInOneOrder() {
         var p=new BenchPatternDetails(target,1,List.of(of(a,1)));
         var q=new BenchPatternDetails(target,1,List.of(of(b,1)));

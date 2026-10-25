@@ -32,12 +32,33 @@ public abstract class AdvancedProductionCpuMixin {
     @Shadow private void postChange(AEKey key) { throw new AssertionError(); }
     @Unique private ProductionJob aecraftroute$production;
     @Unique private final com.aecraftroute.addon.telemetry.LogThrottle aecraftroute$deliveryLogs = new com.aecraftroute.addon.telemetry.LogThrottle();
+    @Unique private Object aecraftroute$lastPosition;
+    @Unique private long aecraftroute$stallSince, aecraftroute$lastStallLog;
+    @Unique private final com.aecraftroute.addon.telemetry.LogThrottle aecraftroute$dispatchLogs = new com.aecraftroute.addon.telemetry.LogThrottle();
+
+    /** Same stall watchdog as the native bridge: 30 s without any dispatch prints the
+     * cursor, outstanding returns and CPU inventory instead of silently holding. */
+    @Unique private void aecraftroute$watchStall() {
+        if(aecraftroute$production==null || job==null || aecraftroute$production.done()) return;
+        var access=(AdvancedGrowthJobAccessor)(Object)job;
+        var position=aecraftroute$production.position();
+        long now=System.nanoTime();
+        if(!position.equals(aecraftroute$lastPosition)) { aecraftroute$lastPosition=position; aecraftroute$stallSince=now; return; }
+        if(now-aecraftroute$stallSince<30_000_000_000L || now-aecraftroute$lastStallLog<30_000_000_000L) return;
+        aecraftroute$lastStallLog=now;
+        com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                "[AE-Craftroute] AdvancedAE certified job stalled 30s: position={} remaining={} active={} suspended={} canceled={} waitingFor={} inventory={}",
+                position, aecraftroute$production.remainingCounts(), cpu.isActive(), access.aecraftroute$getSuspended(),
+                access.aecraftroute$getLink().isCanceled(), access.aecraftroute$getWaitingFor().list, inventory.list);
+    }
 
     @Inject(method="trySubmitJob",at=@At("RETURN"))
     private void aecraftroute$attach(IGrid grid,ICraftingPlan plan,IActionSource source,ICraftingRequester requester,
             CallbackInfoReturnable<ICraftingSubmitResult> cir) {
         if(cir.getReturnValue().successful()) {
             aecraftroute$deliveryLogs.reset();
+            aecraftroute$dispatchLogs.reset();
+            aecraftroute$lastPosition=null; aecraftroute$stallSince=System.nanoTime(); aecraftroute$lastStallLog=0;
             if(plan instanceof CertifiedCraftingPlan certified){
                 aecraftroute$production=new ProductionJob(certified);
                 com.aecraftroute.addon.api.DispatchTrace.certified("advanced_ae");
@@ -51,15 +72,24 @@ public abstract class AdvancedProductionCpuMixin {
     @WrapOperation(method="executeCrafting",at=@At(value="INVOKE",target="Lappeng/crafting/execution/CraftingCpuHelper;extractPatternInputs(Lappeng/api/crafting/IPatternDetails;Lappeng/crafting/inv/ICraftingInventory;Lnet/minecraft/world/level/Level;Lappeng/api/stacks/KeyCounter;Lappeng/api/stacks/KeyCounter;)[Lappeng/api/stacks/KeyCounter;"))
     private KeyCounter[] aecraftroute$orderedInputs(IPatternDetails pattern,ICraftingInventory inv,Level level,
             KeyCounter expected,KeyCounter containers,Operation<KeyCounter[]> original) {
-        return aecraftroute$production==null?original.call(pattern,inv,level,expected,containers)
-                :aecraftroute$production.extract(pattern,inv,level,expected,containers);
+        if(aecraftroute$production==null) return original.call(pattern,inv,level,expected,containers);
+        var extracted=aecraftroute$production.extract(pattern,inv,level,expected,containers);
+        if(extracted==null && aecraftroute$production.allows(pattern) && aecraftroute$dispatchLogs.acquireDelayed("inputs"))
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                    "[AE-Craftroute] AdvancedAE certified dispatch waiting: current step inputs unavailable or invalid; inventory={}",
+                    inventory.list);
+        return extracted;
     }
 
     @WrapOperation(method="executeCrafting",at=@At(value="INVOKE",target="Lappeng/api/networking/crafting/ICraftingProvider;pushPattern(Lappeng/api/crafting/IPatternDetails;[Lappeng/api/stacks/KeyCounter;)Z"))
     private boolean aecraftroute$accepted(ICraftingProvider provider,IPatternDetails pattern,KeyCounter[] inputs,Operation<Boolean> original) {
         if(aecraftroute$production!=null && !aecraftroute$production.allows(pattern)) return false;
         boolean accepted=original.call(provider,pattern,inputs);
-        if(accepted && aecraftroute$production!=null) { aecraftroute$production.accepted(pattern); cpu.markDirty(); }
+        if(accepted && aecraftroute$production!=null) { aecraftroute$production.accepted(pattern); aecraftroute$dispatchLogs.reset(); cpu.markDirty(); }
+        else if(!accepted && aecraftroute$production!=null && aecraftroute$dispatchLogs.acquireDelayed("refused"))
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                    "[AE-Craftroute] AdvancedAE certified dispatch refused by provider {} for the current step",
+                    provider.getClass().getName());
         return accepted;
     }
 
@@ -82,6 +112,7 @@ public abstract class AdvancedProductionCpuMixin {
 
     @Inject(method="tickCraftingLogic",at=@At("TAIL"))
     private void aecraftroute$deliver(IEnergyService energy,CraftingService service,CallbackInfo ci) {
+        aecraftroute$watchStall();
         if(aecraftroute$production==null || job==null || !aecraftroute$production.done()) return;
         var access=(AdvancedGrowthJobAccessor)(Object)job;
         if(access.aecraftroute$getLink().isCanceled() || access.aecraftroute$getSuspended() || !cpu.isActive()) return;

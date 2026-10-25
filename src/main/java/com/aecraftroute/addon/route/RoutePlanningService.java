@@ -56,8 +56,51 @@ public final class RoutePlanningService {
             }
         }
     }
+    /** Conservative cross-request fast path inspired by upstream AE2-VM tryFastPath: a repeated
+     * request for the same grid/policy/target/amount reuses the last certified plan when
+     * every pattern it executes is still published and its startup capital is still in
+     * stock as pure leaves. Capture and search are skipped entirely; the atomic validation boundary is
+     * NOT skipped, it runs inline on the server thread. */
+    private static final Map<IGrid,Map<ReuseKey,CertifiedCraftingPlan>> REUSE=new WeakHashMap<>();
+    private record ReuseKey(RoutePolicy<AEKey> policy,AEKey key,long amount) {}
+    static synchronized void remember(IGrid grid,RoutePolicy<AEKey> policy,AEKey key,long amount,CertifiedCraftingPlan plan) {
+        var per=REUSE.computeIfAbsent(grid,g->new LinkedHashMap<>(16,0.75f,true));
+        per.put(new ReuseKey(policy,key,amount),plan);
+        if(per.size()>64) {var oldest=per.keySet().iterator();oldest.next();oldest.remove();}
+    }
+    static synchronized CertifiedCraftingPlan reuse(IGrid grid,RoutePolicy<AEKey> policy,AEKey key,long amount) {
+        var per=REUSE.get(grid); return per==null?null:per.get(new ReuseKey(policy,key,amount));
+    }
+    static synchronized void forget(IGrid grid,RoutePolicy<AEKey> policy,AEKey key,long amount) {
+        var per=REUSE.get(grid); if(per!=null) per.remove(new ReuseKey(policy,key,amount));
+    }
+    static synchronized void clearReuse() {REUSE.clear();}
+    /** Conservative fast-path guards: startup capital must still be stocked pure
+     * leaves, and every executed pattern must still be the published instance.
+     * A failed guard or expired tick slice falls back to normal capture/search. */
+    static boolean stillExecutable(IGrid grid,CertifiedCraftingPlan plan,long validationEnd) {
+        if(System.nanoTime()>=validationEnd)return false;
+        var live=grid.getStorageService().getInventory().getAvailableStacks();
+        for(var entry:plan.usedItems()) {
+            if(System.nanoTime()>=validationEnd)return false;
+            if(entry.getLongValue()>0 && Math.max(0,live.get(entry.getKey()))<entry.getLongValue()) return false;
+            if(entry.getLongValue()>0 && !grid.getCraftingService().getCraftingFor(entry.getKey()).isEmpty())return false;
+        }
+        for(var pattern:plan.patternTimes().keySet()) {
+            if(System.nanoTime()>=validationEnd)return false;
+            boolean published=false;
+            for(var out:pattern.getOutputs()) {
+                if(System.nanoTime()>=validationEnd)return false;
+                if(grid.getCraftingService().getCraftingFor(out.what()).stream().anyMatch(p->p==pattern)) {published=true;break;}
+            }
+            if(!published) return false;
+            com.aecraftroute.addon.compat.ScaledPatternCompat.validate(pattern);
+        }
+        return System.nanoTime()<validationEnd;
+    }
     static final class Job {
         final CaptureWork capture; final ExecutorService executor; final RoutePolicy<AEKey> policy; final AEKey key;
+        final IGrid gridRef;
         final long amount,deadline; final int states; final BooleanSupplier valid;
         final long createdAt=System.nanoTime();
         volatile Phase phase=Phase.CAPTURE,errorPhase;
@@ -66,14 +109,19 @@ public final class RoutePlanningService {
         final CompletableFuture<CertifiedCraftingPlan> result=new CompletableFuture<>();
         volatile Future<?> worker; volatile CertifiedCraftingPlan plan; volatile Throwable error; volatile boolean finished;
         Job(IGrid grid,RoutePolicy<AEKey> policy,HolderLookup.Provider registries,AEKey key,long amount,ProductionPlanner.Limits limits,BooleanSupplier valid) {
-            this(policy,key,amount,limits,valid,WORKERS,null);
+            this(grid,policy,key,amount,limits,valid,WORKERS,null);
             captureSource=new LiveCapture(new RouteSnapshot.Capture(grid,policy,registries,key,deadline));
         }
         private CaptureWork captureSource;
         /** Same production state machine with injectable capture and executor for lifecycle tests. */
         Job(RoutePolicy<AEKey> policy,AEKey key,long amount,ProductionPlanner.Limits limits,BooleanSupplier valid,
             ExecutorService executor,CaptureWork capture) {
+            this(null,policy,key,amount,limits,valid,executor,capture);
+        }
+        private Job(IGrid grid,RoutePolicy<AEKey> policy,AEKey key,long amount,ProductionPlanner.Limits limits,BooleanSupplier valid,
+            ExecutorService executor,CaptureWork capture) {
             this.policy=policy;this.key=key;this.amount=amount;this.states=limits.states();this.valid=valid;this.executor=executor;
+            this.gridRef=grid;
             deadline=System.nanoTime()+limits.nanos();this.capture=capture;
             result.whenComplete((p,e)->{if(result.isCancelled() && worker!=null)worker.cancel(true);});
         }
@@ -84,6 +132,19 @@ public final class RoutePlanningService {
                 if(!valid.getAsBoolean()) {result.cancel(true);return;}
                 RouteCanvasPlanner.check(deadline);
                 if(worker==null) {
+                    if(gridRef!=null) {
+                        var cached=reuse(gridRef,policy,key,amount);
+                        if(cached!=null) {
+                            phase=Phase.VALIDATION;long validationStart=System.nanoTime();
+                            boolean executable;
+                            try {executable=stillExecutable(gridRef,cached,Math.min(deadline,sliceEnd));} finally {validationNanos+=System.nanoTime()-validationStart;}
+                            if(executable) {
+                                if(!valid.getAsBoolean()) {result.cancel(true);return;}
+                                RouteCanvasPlanner.check(deadline);phase=Phase.COMPLETE;result.complete(cached);return;
+                            }
+                            forget(gridRef,policy,key,amount);
+                        }
+                    }
                     phase=Phase.CAPTURE;
                     while(true) {
                         long captureStart=System.nanoTime();boolean done;
@@ -113,7 +174,9 @@ public final class RoutePlanningService {
                     phase=Phase.VALIDATION;long validationStart=System.nanoTime();
                     try {capture().validate(deadline,validationEnd,plan);} finally {validationNanos+=System.nanoTime()-validationStart;}
                     if(!valid.getAsBoolean()) {result.cancel(true);return;}
-                    RouteCanvasPlanner.check(deadline);phase=Phase.COMPLETE;result.complete(plan);
+                    RouteCanvasPlanner.check(deadline);phase=Phase.COMPLETE;
+                    if(gridRef!=null) remember(gridRef,policy,key,amount,plan);
+                    result.complete(plan);
                 }
             } catch(Throwable failure) {
                 if(worker!=null)worker.cancel(true);
@@ -181,6 +244,6 @@ public final class RoutePlanningService {
     static void cancelJobs(List<Job> jobs) {
         var old=new ArrayList<>(jobs);jobs.clear();for(var j:old)j.result.cancel(true);
     }
-    @SubscribeEvent public static void stopped(ServerStoppedEvent event) {cancelJobs(JOBS);WORKERS.purge();}
+    @SubscribeEvent public static void stopped(ServerStoppedEvent event) {cancelJobs(JOBS);clearReuse();WORKERS.purge();}
     private RoutePlanningService() {}
 }
