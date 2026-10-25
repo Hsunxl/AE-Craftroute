@@ -22,6 +22,9 @@ import java.util.function.Consumer;
 final class RouteJeiRecipes implements RouteRecipeBrowser {
     private final IJeiRuntime runtime;
     private final List<Entry<?>> recipes=new ArrayList<>();
+    private final Map<Entry<?>,List<Entry<?>>> variants=new IdentityHashMap<>();
+    private final Map<Entry<?>,List<ITypedIngredient<?>>> groupedMachines=new IdentityHashMap<>();
+    private final RouteMachineTray<ITypedIngredient<?>> machineTray=new RouteMachineTray<>();
     private AEKey key;
     private RouteEmcAccess.State emc=new RouteEmcAccess.State(0,null,null);
     private long demand=1;
@@ -42,7 +45,8 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     private float scale=1;
     private IRecipeLayoutDrawable<?> layout;
     private List<ITypedIngredient<?>> machines=List.of();
-    private ITypedIngredient<?> shownMachine;
+    private ITypedIngredient<?> shownMachine,shownEmcMachine;
+    private List<ITypedIngredient<?>> emcDevices;
     private String error="",focusedId;
     private boolean picking,moving;
     private int pickerPage;
@@ -53,32 +57,36 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     private final Map<Object,List<ITypedIngredient<?>>> catalystCache=new HashMap<>();
     private final Map<Integer,ITypedIngredient<?>> optionMachine=new HashMap<>();
     private List<ITypedIngredient<?>> catalysts(Entry<?> entry) {
+        var grouped=groupedMachines.get(entry);return grouped==null?rawCatalysts(entry):grouped;
+    }
+    private List<ITypedIngredient<?>> rawCatalysts(Entry<?> entry) {
         var type=entry.category().getRecipeType();
         return catalystCache.computeIfAbsent(type,t->{
-            try {return runtime.getRecipeManager().createRecipeCatalystLookup(type).get().toList();}
+            try {return runtime.getRecipeManager().createRecipeCatalystLookup(type).get().filter(value->!RouteEmcPresentation.isCurrency(ingredientKey(value))).toList();}
             catch(RuntimeException ignored) {return List.of();}
         });
     }
     public void renderOption(GuiGraphics g,int index,int x,int y,int width,int mx,int my) {
         if(emc.available() && index==recipes.size()) {
-            drawEmcIcon(g,x+1,y+1);
+            renderEmcMachine(g,x,y,mx,my);
             if(index==this.index)g.fill(x+20,y,x+width,y+18,0xFFC6C6D4);
             var font=Minecraft.getInstance().font;
             g.drawString(font,font.plainSubstrByWidth((index==this.index?"✓ ":"")+(index+1)+". EMC 转换 · "+emc.unit(),Math.max(1,width-23)),x+22,y+5,0x303030,false);
-            if(mx>=x && mx<x+width && my>=y && my<y+18)g.renderComponentTooltip(font,List.of(Component.literal("ProjectE · EMC 转换"),Component.literal("每个消耗 "+emc.unit()+" EMC；可选为画布获取路线")),mx,my);
+            if(mx>=x && mx<x+width && my>=y && my<y+18)g.renderComponentTooltip(font,List.of(Component.literal("ProjectE · EMC 转换（转换桌/转换台）"),Component.literal("每个消耗 "+emc.unit()+" EMC；可选为画布获取路线")),mx,my);
             return;
         }
         if(index<0 || index>=recipes.size())return;
         var entry=recipes.get(index);var candidates=catalysts(entry);
+        if(mx>=x && mx<x+18 && my>=y && my<y+18)offerMachines(g,candidates,x,y);
         boolean hover=mx>=x && mx<x+width && my>=y && my<y+18;
         var machine=optionMachine.get(index);
-        if(!hover || machine==null)machine=candidates.isEmpty()?null:candidates.get(Math.floorMod(ticks/60,candidates.size()));
+        if(!hover || machine==null)machine=candidates.isEmpty()?null:candidates.get(RouteMachineCycle.index(ticks,candidates.size(),candidates.indexOf(machine),hover));
         if(machine!=null) {optionMachine.put(index,machine);drawTyped(g,machine,x+1,y+1);}
         else {var icon=entry.category().getIcon();if(icon!=null)drawCategoryIcon(g,icon,x+1,y+1);}
         if(index==this.index)g.fill(x+20,y,x+width,y+18,0xFFC6C6D4);
-        String text=(index==this.index?"✓ ":"")+(index+1)+". "+entry.category().getTitle().getString();
+        String text=(index==this.index?"✓ ":"")+(index+1)+". "+entry.category().getTitle().getString()+(candidates.size()>1?" · "+candidates.size()+" 机器":"");
         g.drawString(Minecraft.getInstance().font,Minecraft.getInstance().font.plainSubstrByWidth(text,Math.max(1,width-23)),x+22,y+5,0x303030,false);
-        if(hover)g.renderComponentTooltip(Minecraft.getInstance().font,List.of(Component.literal(text),Component.literal(recipeId(entry)),Component.literal("点击行预览/选择；设备图标查询设备配方")),mx,my);
+        if(hover)g.renderComponentTooltip(Minecraft.getInstance().font,List.of(Component.literal(text),Component.literal(recipeId(entry)),Component.literal("点击行预览/选择；悬停设备图标展开全部机器")),mx,my);
     }
     public void showOptionMachine(int index) {
         if(emc.available() && index==recipes.size()) {showEmcMachine();return;}
@@ -90,17 +98,18 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     /** Machine icon rotation period in client ticks (60 ticks = about 3 seconds). */
     private static final int MACHINE_ROTATE_TICKS=60;
     public void renderMachine(String id,GuiGraphics g,int x,int y,int mx,int my) {
-        if(RouteEmcRules.isEmc(id)) {drawEmcIcon(g,x+1,y+1);return;}
+        if(RouteEmcRules.isEmc(id)) {renderEmcMachine(g,x,y,mx,my);return;}
         var info=treeMachines.get(id);if(info==null) {g.drawString(Minecraft.getInstance().font,"?",x+4,y+4,0x555555,false);return;}
         boolean hover=mx>=x && mx<x+18 && my>=y && my<y+18;
+        if(hover)offerMachines(g,info.candidates,x,y);
         var machine=treeShown.get(id);
-        if(!hover || machine==null)machine=info.candidates.isEmpty()?null:info.candidates.get(Math.floorMod(ticks/MACHINE_ROTATE_TICKS,info.candidates.size()));
+        if(!hover || machine==null)machine=info.candidates.isEmpty()?null:info.candidates.get(RouteMachineCycle.index(ticks,info.candidates.size(),info.candidates.indexOf(machine),hover));
         if(machine!=null) {treeShown.put(id,machine);drawTyped(g,machine,x+1,y+1);}
         else if(info.icon!=null)drawCategoryIcon(g,info.icon,x+1,y+1);
         else g.drawString(Minecraft.getInstance().font,"?",x+4,y+4,0x555555,false);
     }
     public List<Component> machineTooltip(String id) {
-        if(RouteEmcRules.isEmc(id)) return List.of(Component.literal("ProjectE · EMC 转换"));
+        if(RouteEmcRules.isEmc(id)) return List.of(Component.literal("ProjectE · EMC 转换（转换桌/转换台）"));
         var info=treeMachines.get(id);
         if(info==null) return List.of(Component.literal(id==null?"原生样板未提供 JEI 配方标识，设备未知":"此配方尚未在 JEI 中加载，设备未知"));
         var machine=treeShown.get(id);
@@ -111,7 +120,7 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         if(n==0) lines.add(Component.literal("无可用设备候选"));
         else if(n>1) {
             int i=machine==null?0:info.candidates.indexOf(machine)+1;
-            lines.add(Component.literal("候选设备 "+i+" / "+n+"，约每 3 秒轮换；悬停于图标时暂停"));
+            lines.add(Component.literal("候选设备 "+i+" / "+n+"，约每 3 秒轮换；悬停图标展开全部机器"));
         }
         if(n>0)lines.add(Component.literal("点击查询此设备自身配方"));
         else lines.add(Component.literal("仅显示配方分类图标，不代表已识别机器"));
@@ -119,8 +128,58 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     }
     public void showMachine(String id) {if(RouteEmcRules.isEmc(id)) {showEmcMachine();return;}var machine=treeShown.get(id);if(machine!=null)showIngredient(machine,RecipeIngredientRole.OUTPUT);}
     private <T> void remember(Entry<T> entry) {
-        treeMachines.put(recipeId(entry),new MachineInfo(catalysts(entry),entry.category.getIcon(),entry.category.getTitle().getString()));
+        var info=new MachineInfo(catalysts(entry),entry.category.getIcon(),entry.category.getTitle().getString());
+        for(var variant:variants.getOrDefault(entry,List.of(entry)))treeMachines.put(recipeId(variant),info);
     }
+    private <T> Object machineIdentity(ITypedIngredient<T> ingredient) {
+        return List.of(ingredient.getType(),runtime.getIngredientManager().getIngredientHelper(ingredient.getType())
+                .getUid(ingredient,mezz.jei.api.ingredients.subtypes.UidContext.Ingredient));
+    }
+    private <T> String semanticIdentity(Entry<T> entry) {
+        Object value=entry.recipe();
+        if(value instanceof net.minecraft.world.item.crafting.RecipeHolder<?> holder)value=holder.value();
+        if(value instanceof net.minecraft.world.item.crafting.Recipe<?> recipe) {
+            if(recipe.isSpecial())return null;
+            var ops=Minecraft.getInstance().level.registryAccess().createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
+            var encoded=net.minecraft.world.item.crafting.Recipe.CODEC.encodeStart(ops,recipe).result();
+            return encoded.map(json->"serialized:"+json).orElse(null);
+        }
+        var id=entry.category().getRegistryName(entry.recipe());
+        return id==null?null:"registered:"+value.getClass().getName()+":"+id;
+    }
+    private <T> RouteRecipeGroups.Key groupKey(Entry<T> entry) {
+        try {
+            String identity=semanticIdentity(entry);if(identity==null)return null;
+            var drawable=create(entry);if(drawable==null)return null;
+            var slots=new ArrayList<RouteRecipeGroups.Slot>();
+            for(var slot:drawable.getRecipeSlotsView().getSlotViews()) {
+                if(slot.getRole()!=RecipeIngredientRole.INPUT && slot.getRole()!=RecipeIngredientRole.OUTPUT)continue;
+                var values=new ArrayList<RouteRecipeGroups.Ingredient>();
+                for(var typed:slot.getAllIngredientsList()) {
+                    var stack=RouteJeiConverters.from(typed);
+                    values.add(new RouteRecipeGroups.Ingredient(stack.what().toTagGeneric(Minecraft.getInstance().level.registryAccess()).toString(),stack.amount()));
+                }
+                slots.add(new RouteRecipeGroups.Slot(slot.getRole().name(),values));
+            }
+            return slots.isEmpty()?null:new RouteRecipeGroups.Key(identity,slots);
+        } catch(RuntimeException unsupported) {return null;}
+    }
+    private void groupRecipes() {
+        var groups=RouteRecipeGroups.group(recipes,this::groupKey);recipes.clear();variants.clear();groupedMachines.clear();
+        for(var group:groups) {
+            var representative=group.getFirst();recipes.add(representative);variants.put(representative,group);
+            var all=new ArrayList<ITypedIngredient<?>>();for(var entry:group)all.addAll(rawCatalysts(entry));
+            groupedMachines.put(representative,RouteRecipeGroups.unique(all,this::machineIdentity));remember(representative);
+        }
+    }
+    private void offerMachines(GuiGraphics g,List<ITypedIngredient<?>> candidates,int x,int y) {
+        machineTray.offerWorld(g,candidates,x,y);
+    }
+    public void clearMachineOverlay() {machineTray.clear();}
+    public void renderMachineOverlay(GuiGraphics g,int mx,int my) {machineTray.render(g,mx,my,this::drawTyped,this::name);}
+    public boolean clickMachineOverlay(double mx,double my,int button) {return machineTray.click(mx,my,button,value->showIngredient(value,RecipeIngredientRole.OUTPUT));}
+    public boolean scrollMachineOverlay(double mx,double my,double delta) {return machineTray.scroll(mx,my,delta);}
+
     private double pressX,pressY,dragX,dragY;
     public List<Option> options() {
         var result=new ArrayList<Option>();
@@ -165,13 +224,13 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         for(int i=0;i<recipes.size();i++)if(matchesId(recipes.get(i),id)) {index=i;load();break;}
     }
     private <T> boolean matchesId(Entry<T> entry,String id) {
-        return recipeId(entry).equals(id);
+        return variants.getOrDefault(entry,List.of(entry)).stream().anyMatch(variant->recipeId(variant).equals(id));
     }
     private record Entry<T>(IRecipeCategory<T> category,T recipe,IFocusGroup focus) {}
     RouteJeiRecipes(IJeiRuntime runtime) {this.runtime=runtime;}
     public void select(AEKey key) {
         if(Objects.equals(key,this.key))return;
-        this.key=key;optionMachine.clear();focusedId=null;index=0;picking=false;held=null;recipes.clear();layout=null;error="";
+        this.key=key;machineTray.clear();variants.clear();groupedMachines.clear();optionMachine.clear();focusedId=null;index=0;picking=false;held=null;recipes.clear();layout=null;error="";
         emc=RouteEmcAccess.query(key);
         if(key==null)return;
         try {
@@ -185,22 +244,22 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
             runtime.getRecipeManager().createRecipeCategoryLookup().limitFocus(List.of(focus)).get().forEach(category->{
                 try {collect(category,group);}catch(RuntimeException e) {error="部分 JEI 分类读取失败";}
             });
-            load();
+            groupRecipes();load();
         }catch(RuntimeException e) {error="JEI 配方读取失败："+e.getClass().getSimpleName();}
     }
     private <T> void collect(IRecipeCategory<T> category,IFocusGroup focus) {
         runtime.getRecipeManager().createRecipeLookup(category.getRecipeType()).limitFocus(focus.getAllFocuses()).get()
-                .forEach(recipe->{var entry=new Entry<>(category,recipe,focus);recipes.add(entry);remember(entry);});
+                .forEach(recipe->{var entry=new Entry<>(category,recipe,focus);recipes.add(entry);});
     }
     private <T> IRecipeLayoutDrawable<T> create(Entry<T> entry) {
         return runtime.getRecipeManager().createRecipeLayoutDrawable(entry.category(),entry.recipe(),entry.focus()).orElse(null);
     }
     private void load() {
-        layout=null;stableDraft=null;shownMachine=null;machines=List.of();bodyHeight=0;error="";emcScroll=0;
+        machineTray.clear();layout=null;stableDraft=null;shownMachine=null;machines=List.of();bodyHeight=0;error="";emcScroll=0;
         if(emcSelected() || recipes.isEmpty())return;
         try {layout=create(recipes.get(index));}
         catch(RuntimeException e) {error="此插件的原生配方布局无法创建";}
-        if(layout!=null)try {machines=runtime.getRecipeManager().createRecipeCatalystLookup(layout.getRecipeCategory().getRecipeType()).get().toList();}
+        if(layout!=null)try {machines=catalysts(recipes.get(index));}
         catch(RuntimeException ignored) {machines=List.of();}
     }
     public void page(int delta) {if(count()>0)selectIndex(Math.max(0,Math.min(index+delta,count()-1)));}
@@ -231,7 +290,7 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         else {
             String title=layout.getRecipeCategory().getTitle().getString();
             boolean machineHover=mx>=x+w-20 && mx<x+w-2 && my>=y && my<y+18;
-            if(!machineHover || shownMachine==null)shownMachine=machines.isEmpty()?null:machines.get(Math.floorMod(ticks/60,machines.size()));
+            if(!machineHover || shownMachine==null)shownMachine=machines.isEmpty()?null:machines.get(RouteMachineCycle.index(ticks,machines.size(),machines.indexOf(shownMachine),machineHover));
             try {drawMachine(g,mx,my,title);}catch(RuntimeException e) {error="JEI 设备图标无法绘制";}
             if(bodyHeight>=24) {
                 var border=layout.getRectWithBorder();var recipeRect=layout.getRect();
@@ -271,16 +330,29 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     }
     private int pickerCapacity() {return RoutePopupPage.capacity(h,40,5);}
     private RoutePopupPage pickerWindow() {return RoutePopupPage.of(count(),pickerCapacity(),pickerPage);}
-    private net.minecraft.world.item.ItemStack emcMachine() {
-        return new net.minecraft.world.item.ItemStack(net.minecraft.core.registries.BuiltInRegistries.ITEM.get(
-                net.minecraft.resources.ResourceLocation.parse("projecte:transmutation_table")));
+    private List<ITypedIngredient<?>> emcDevices() {
+        if(emcDevices!=null)return emcDevices;
+        var result=new ArrayList<ITypedIngredient<?>>();
+        for(String id:List.of("projecte:transmutation_table","projecte:transmutation_tablet")) {
+            var item=net.minecraft.core.registries.BuiltInRegistries.ITEM.getOptional(net.minecraft.resources.ResourceLocation.parse(id));
+            if(item.isPresent())runtime.getIngredientManager().createTypedIngredient(new net.minecraft.world.item.ItemStack(item.get()),false).ifPresent(result::add);
+        }
+        emcDevices=List.copyOf(result);return emcDevices;
     }
-    private void drawEmcIcon(GuiGraphics g,int x,int y) {g.renderItem(emcMachine(),x,y);}
-    private void showEmcMachine() {runtime.getRecipesGui().show(List.of(runtime.getJeiHelpers().getFocusFactory().createFocus(
-            RecipeIngredientRole.OUTPUT,mezz.jei.api.constants.VanillaTypes.ITEM_STACK,emcMachine())));}
+    private void renderEmcMachine(GuiGraphics g,int x,int y,int mx,int my) {
+        var candidates=emcDevices();if(candidates.isEmpty())return;
+        boolean hover=mx>=x && mx<x+18 && my>=y && my<y+18;
+        int selected=RouteMachineCycle.index(ticks,candidates.size(),candidates.indexOf(shownEmcMachine),hover);
+        shownEmcMachine=candidates.get(selected);drawTyped(g,shownEmcMachine,x+1,y+1);
+        if(hover)offerMachines(g,candidates,x,y);
+    }
+    private void showEmcMachine() {
+        if(shownEmcMachine==null && !emcDevices().isEmpty())shownEmcMachine=emcDevices().getFirst();
+        if(shownEmcMachine!=null)showIngredient(shownEmcMachine,RecipeIngredientRole.OUTPUT);
+    }
     private void renderEmc(GuiGraphics g) {
         var font=Minecraft.getInstance().font;
-        drawEmcIcon(g,x+w-20,y+1);
+        renderEmcMachine(g,x+w-20,y,lastMouseX,lastMouseY);
         var total=RouteEmcRules.cost(emc.unit(),demand);
         if(bodyHeight<=2)return;
         var lines=new ArrayList<String>();
@@ -330,6 +402,7 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
             if(icon!=null)drawCategoryIcon(g,icon,sx+1,sy+1);
         }
         if(mx>=sx && mx<sx+18 && my>=sy && my<sy+18) {
+            offerMachines(g,machines,sx,sy);
             var lines=List.<Component>of(Component.literal(shownMachine==null?title:name(shownMachine)),Component.literal(
                     shownMachine==null?"分类未提供可查询的设备物品":"点击查看此机器自身的合成配方"));
             g.renderComponentTooltip(Minecraft.getInstance().font,lines,mx,my);

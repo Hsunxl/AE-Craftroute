@@ -24,6 +24,7 @@ public final class RouteBranchEdits {
         if(hk!=null && hk.contains(key))return false;
         return !visible.containsKey(parent)||visible.get(parent).contains(key);
     }
+    public void toggleExpanded(String path) {if(!collapsed.remove(path))collapsed.add(path);}
     public void collapse(String path) {collapsed.add(path);}
     public void hide(String path) {hidden.add(path);}
     public void hide(String parent,String key) {hiddenKeys.computeIfAbsent(parent,p->new HashSet<>()).add(key);}

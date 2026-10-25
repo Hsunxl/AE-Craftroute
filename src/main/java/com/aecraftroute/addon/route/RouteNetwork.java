@@ -136,6 +136,15 @@ public final class RouteNetwork {
                     if (size > 170000) { truncated = true; break; }
                     choices.add(choice);
                 }
+                var wanted=choices.stream().map(RouteView.Choice::id).collect(java.util.stream.Collectors.toSet());
+                var sources=RoutePatternSources.find(grid,player.serverLevel(),wanted);
+                for(int i=0;i<choices.size();i++) {
+                    var choice=choices.get(i);
+                    var enriched=new RouteView.Choice(choice.id(),choice.inputs(),choice.outputs(),choice.alternatives(),
+                            sources.getOrDefault(choice.id(),List.of()));
+                    int delta=GSON.toJson(enriched).length()-GSON.toJson(choice).length();
+                    if(size+delta<=170000) {choices.set(i,enriched);size+=delta;}else truncated=true;
+                }
                 RoutePlanView planView = null;
                 reply(context, request, new RouteView.Reply(message, choices, rule.locked(),
                         new ArrayList<>(rule.banned()), rule.stockOnly(), policy.rules().size(), truncated,

@@ -25,6 +25,12 @@ public final class CraftRouteConfig {
     /** 是否输出调试日志（被 if (isDebugLogging()) 包裹的额外 LOGGER.info 调用）。默认 false。 */
     public static final ModConfigSpec.BooleanValue DEBUG_LOGGING;
 
+    public static final ModConfigSpec.BooleanValue SCROLL_EDITS_QUANTITY;
+
+    public static boolean scrollEditsQuantity() {
+        try { return SCROLL_EDITS_QUANTITY.get(); } catch (IllegalStateException e) { return false; }
+    }
+
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
 
@@ -42,6 +48,9 @@ public final class CraftRouteConfig {
                         "修改后需要重启游戏生效（Requires Restart）。",
                         "实际上只是输出额外的调试信息，不影响性能（未启用时跳过日志调用，几乎零开销）。")
                 .define("debugLogging", false);
+
+        SCROLL_EDITS_QUANTITY = builder.comment("Legacy canvas wheel: quantity over nodes, Ctrl to zoom. Default false.")
+                .define("scrollEditsQuantity", false);
 
         COMMON_SPEC = builder.build();
     }

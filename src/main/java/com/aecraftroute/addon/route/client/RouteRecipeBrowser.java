@@ -21,6 +21,10 @@ public interface RouteRecipeBrowser {
     interface IngredientDrop {void accept(RouteView.Draft draft,AEKey ingredient,double x,double y);}
     default boolean release(double x,double y,int button,IngredientDrop drop) {return false;}
     default void renderDrag(GuiGraphics graphics) {}
+    default void clearMachineOverlay() {}
+    default void renderMachineOverlay(GuiGraphics graphics,int mx,int my) {}
+    default boolean clickMachineOverlay(double mx,double my,int button) {return false;}
+    default boolean scrollMachineOverlay(double mx,double my,double delta) {return false;}
     default boolean draggingIngredient() {return false;}
     default boolean pickingRecipe() {return false;}
     default void renderMachine(String recipeId,GuiGraphics graphics,int x,int y,int mx,int my) {}

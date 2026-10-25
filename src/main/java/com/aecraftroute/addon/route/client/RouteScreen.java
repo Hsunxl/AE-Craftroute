@@ -103,13 +103,17 @@ public final class RouteScreen extends Screen {
     private final List<ActionHit> nodeMenuHits=new ArrayList<>();
     private boolean nodeMenu;
     private boolean nodeMenuRecipes;
+    private RouteNodeMenu.Page nodeMenuSection=RouteNodeMenu.Page.ROOT,recipeReturnSection=RouteNodeMenu.Page.ROOT;
     private int nodeMenuX,nodeMenuY,nodeMenuPage,nodeMenuLeft,nodeMenuTop,nodeMenuWidth,nodeMenuHeight;
     private MNode nodeMenuTarget;
     private long ticks;
     private void openNodeMenu(MNode node,double mx,double my,boolean recipes) {
+        nativeMachines.clearOverlay();if(browser!=null)browser.clearMachineOverlay();
+        if(itemId!=null)itemId.setFocused(false);cancelQuantity();
         selectedNode=node;selectedKey=node.material.key;selectedRecipe=null;jeiTab=true;
         if(browser!=null)browser.select(node.material.renderKey);
         nodeMenu=true;nodeMenuRecipes=recipes;nodeMenuPage=0;nodeMenuTarget=node;
+        nodeMenuSection=RouteNodeMenu.Page.ROOT;recipeReturnSection=RouteNodeMenu.Page.ROOT;
         nodeMenuHits.clear();
         nodeMenuX=(int)mx;nodeMenuY=(int)my;
     }
@@ -145,18 +149,23 @@ public final class RouteScreen extends Screen {
     }
     private void drawNodeMenu(GuiGraphics g,int mx,int my) {
         nodeMenuHits.clear();if(!nodeMenu)return;
+        var current=nodeMenuTarget==null?null:findByPath(nodeMenuTarget.path);
+        if(current==null || !current.material.key.equals(nodeMenuTarget.material.key)) {nodeMenu=false;return;}
+        nodeMenuTarget=current;
+        var entries=RouteNodeMenu.entries(nodeMenuSection,new RouteNodeMenu.Context(branchEdits.expanded(current.path),
+                current.recipe!=null,current==root,current.cycle,quantities.containsKey(current.path)));
         var options=browser==null?List.<RouteRecipeBrowser.Option>of():browser.options();
         int capacity=nodeMenuCapacity();
         var page=RoutePopupPage.of(options.size(),capacity,nodeMenuPage);
         nodeMenuPage=page.page();
         int rows=nodeMenuRecipes?page.rows():0,w=Math.max(1,Math.min(240,canvasWidth()-8));
-        int h=nodeMenuRecipes?42+rows*18:60;
+        int h=nodeMenuRecipes?42+rows*18:24+entries.size()*18;
         int x=Math.max(canvasLeft,Math.min(nodeMenuX,canvasRight-w));
         int y=Math.max(canvasTop,Math.min(nodeMenuY,canvasBottom-h));
         nodeMenuLeft=x;nodeMenuTop=y;nodeMenuWidth=w;nodeMenuHeight=h;
         g.pose().pushPose();g.pose().translate(0,0,1000);
         g.fill(x,y,x+w,y+h,0xFFCBCCD4);frame(g,x,y,w,h,ACCENT);
-        text(g,nodeMenuRecipes?"选择配方 · "+page.range(options.size()):"移除分支",x+4,y+5,w-8,TEXT);
+        text(g,nodeMenuRecipes?"选择配方 · "+page.range(options.size()):RouteNodeMenu.title(nodeMenuSection),x+4,y+5,w-8,TEXT);
         for(int row=0;row<rows;row++) {
             int i=page.start()+row;
             var option=options.get(i);int ry=y+20+row*18;
@@ -170,13 +179,41 @@ public final class RouteScreen extends Screen {
         }
         int by=y+20+rows*18;
         if(nodeMenuRecipes) {
-            menuAction(g,x,by,w/2,"‹ 上一页",()->moveNodeMenuPage(-1));
-            menuAction(g,x+w/2,by,w-w/2,"下一页 ›",()->moveNodeMenuPage(1));
+            int part=w/3;
+            menuAction(g,x,by,part,"‹ 返回",this::backNodeMenu);
+            menuAction(g,x+part,by,part,"‹ 上页",()->moveNodeMenuPage(-1));
+            menuAction(g,x+part*2,by,w-part*2,"下页 ›",()->moveNodeMenuPage(1));
         } else {
-            menuAction(g,x,by,w,"只清除下级（保留此物品）",()->removeBranch(nodeMenuTarget,false));
-            menuAction(g,x,by+18,w,"移除此节点及下级",()->removeBranch(nodeMenuTarget,true));
+            for(int i=0;i<entries.size();i++) {
+                var entry=entries.get(i);int ey=by+i*18;
+                if(entry.enabled())menuAction(g,x,ey,w,entry.label(),()->runNodeMenu(entry.action()));
+                else text(g,entry.label(),x+4,ey+5,w-8,FAINT);
+            }
         }
         g.pose().popPose();
+    }
+    private void menuSection(RouteNodeMenu.Page page) {nodeMenuSection=page;nodeMenuRecipes=false;nodeMenuHits.clear();}
+    private void backNodeMenu() {
+        if(nodeMenuRecipes) {menuSection(recipeReturnSection);return;}
+        if(nodeMenuSection!=RouteNodeMenu.Page.ROOT)menuSection(RouteNodeMenu.parent(nodeMenuSection));else nodeMenu=false;
+    }
+    private void resetMenuQuantity() {
+        var node=nodeMenuTarget;if(node==null || node==root || node.cycle || !quantities.containsKey(node.path))return;
+        checkpoint();quantities.remove(node.path);cancelQuantity();nodeMenu=false;rebuildGraph();status="已恢复派生数量";
+    }
+    private void runNodeMenu(RouteNodeMenu.Action action) {
+        var current=nodeMenuTarget==null?null:findByPath(nodeMenuTarget.path);
+        if(current==null || !current.material.key.equals(nodeMenuTarget.material.key)) {nodeMenu=false;return;}
+        nodeMenuTarget=current;selectedNode=current;selectedKey=current.material.key;
+        switch(action) {
+            case BRANCH -> menuSection(RouteNodeMenu.Page.BRANCH);case POLICY -> menuSection(RouteNodeMenu.Page.POLICY);
+            case QUANTITY -> menuSection(RouteNodeMenu.Page.QUANTITY);case REMOVE -> menuSection(RouteNodeMenu.Page.REMOVE);
+            case HELP -> menuSection(RouteNodeMenu.Page.HELP);case BACK -> backNodeMenu();case TOGGLE -> toggleBranch();
+            case RECIPES -> {recipeReturnSection=nodeMenuSection;nodeMenuRecipes=true;nodeMenuPage=0;nodeMenuHits.clear();}
+            case STOCK -> {nodeMenu=false;stockSelected();}case AUTO -> {nodeMenu=false;automaticSelected();}
+            case EDIT -> {nodeMenu=false;startQuantityEdit(nodeMenuTarget);}case RESET -> resetMenuQuantity();
+            case CLEAR -> removeBranch(nodeMenuTarget,false);case DELETE -> removeBranch(nodeMenuTarget,true);case NONE -> {}
+        }
     }
     private int nodeMenuCapacity() {return RoutePopupPage.capacity(canvasBottom-canvasTop,42,5);}
     private void moveNodeMenuPage(int delta) {
@@ -216,8 +253,8 @@ public final class RouteScreen extends Screen {
         selectedNode=node;selectedKey=node.material.key;selectedRecipe=null;
         rebuildGraph();
         for(var child:selectedNode.children)if(child.material.key.equals(ingredientId)) {
-            int ox=(int)contentX(mx)-child.autoX-child.w/2,oy=(int)contentY(my)-child.autoY-child.h/2;
-            offsets.put("m:"+child.path,new int[]{ox,oy});child.x=child.autoX+ox;child.y=child.autoY+oy;break;
+            applyGeometry(RouteTreeGeometry.drag(graphGeometry(),child.path,(int)contentX(mx)-child.x-child.w/2,
+                    (int)contentY(my)-child.y-child.h/2));saveGeometryOffsets();break;
         }
         status="已连接拖入的材料；继续拖其他材料，或在节点菜单选择配方展开全部。编码仍使用完整配方";
     }
@@ -258,7 +295,7 @@ public final class RouteScreen extends Screen {
         quantityText = String.valueOf(node.demand);
         quantityFresh = true;
         selectedNode = node; selectedKey = node.material.key; selectedRecipe = null;
-        status = "输入数量：数字替换原值，Enter 应用，空内容 Enter 恢复自动，Esc 取消";
+        status = "输入或滚轮调整数量：Enter 应用，空内容 Enter 恢复自动，Esc 取消；Shift 滚轮单个调整";
     }
     private void cancelQuantity() { quantityPath = null; quantityText = ""; quantityFresh = false; }
     private void commitQuantity() {
@@ -283,6 +320,10 @@ public final class RouteScreen extends Screen {
     private void adjustQuantity(MNode node, int direction, boolean fine) {
         if (node.cycle) { status = "回料引用节点不能调整数量"; return; }
         long output = node.recipe == null ? 0 : RouteGraphMath.outputAmount(node.recipe.choice, node.material.key);
+        if(node.path.equals(quantityPath)) {
+            quantityText=RouteQuantityField.stepText(quantityText,node.demand,output,direction,fine);quantityFresh=false;
+            status="待确认数量 "+quantityText+"；Enter 应用，Esc 取消";return;
+        }
         long next = RouteGraphMath.stepDemand(node.demand, output, direction, fine);
         if (next == node.demand) return;
         checkpoint();
@@ -348,6 +389,8 @@ public final class RouteScreen extends Screen {
     private int panX, panY;
     private float zoom = 1.0F;
     private boolean fitPending;
+    private int canvasMouseX=-1,canvasMouseY=-1;
+    private Map<AEKey,Long> startupByKey=Map.of();
     private int choiceScroll;
     private int queryCount;
     private static int nextSequence;
@@ -369,7 +412,8 @@ public final class RouteScreen extends Screen {
     private MNode wireFrom;
     private double wireX, wireY;
     private MNode draggedMaterial;
-    private RNode draggedRecipe;
+    private List<RouteTreeGeometry.Box> dragGeometry=List.of();
+    private final RouteNativeMachines nativeMachines=new RouteNativeMachines();
     private EditState pendingDragState;
     private double dragMouseX, dragMouseY;
     private int dragNodeX, dragNodeY;
@@ -484,12 +528,7 @@ public final class RouteScreen extends Screen {
         var modify=new AeButton(modeX,3,36,16,Component.literal("修改"),b->switchMode(true),fromCrafting);
         modify.active=canModify;addRenderableWidget(modify);
         addRenderableWidget(new AeButton(modeX+40,3,36,16,Component.literal("新建"),b->switchMode(false),!fromCrafting));
-        int x=8;
-        if(fromCrafting) { addToolbarButton(compact()?"还原":"还原合成树",x,compact()?52:76,"恢复进入时的网络合成树，不回收已生成样板",this::restoreTree); x+=compact()?56:80; }
-        addToolbarButton(compact()?"撤销":"退回上一步",x,compact()?52:76,"撤销上一次画布编辑，不回收已经生成的样板",this::undoEdit); x+=compact()?56:80;
-        addToolbarButton(compact()?"清空":"清空手动创建",x,compact()?52:84,"清空手动分支，保留最终产物节点",this::clearManual); x+=compact()?56:88;
-        addToolbarButton(compact()?"整理":"自动整理",x,compact()?52:76,"清除手动挪动的位置，按树形重新排列并居中；Home 键同效，配方与材料不变",this::autoArrange); x+=compact()?56:80;
-        addToolbarButton(compact()?"应用":"整幅应用到合成",x,compact()?52:96,"强制画布程序：每个路径至少执行画布计算批次，可继续循环；共享库存，证明成功后原子应用",this::applyCanvas);
+        buildToolbar();
 
         int fieldW = compact()?Math.max(54,Math.min(120,contentRight()-188)):Math.min(180, Math.max(92, contentRight() / 5));
         int fieldX = contentRight() - 8 - (compact()?38:48) - fieldW;
@@ -504,6 +543,27 @@ public final class RouteScreen extends Screen {
         addRenderableWidget(itemId);
         addRenderableWidget(new AeButton(contentRight() - (compact()?42:52), compact()?3:21,
                 compact()?34:44, 19, Component.literal(compact()?"目标":"设为目标"), b -> setTargetFromField(), false));
+    }
+
+    private void buildToolbar() {
+        String[] labels=fromCrafting?new String[]{"还原","撤销","清空","整理","应用","自动","库存","适应"}
+                :new String[]{"撤销","清空","整理","应用","自动","库存","适应"};
+        String[] tips={"还原合成树","撤销上一次画布编辑","清空手动分支，保留最终产物","自动整理（Home）：清除手动位置并适应窗口",
+                "整幅应用到合成","恢复自动路由","仅用现有库存：不再自动选配方，缺料即不可合成","适应窗口：保留手动位置"};
+        Runnable[] actions={this::restoreTree,this::undoEdit,this::clearManual,this::autoArrange,this::applyCanvas,
+                this::automaticSelected,this::stockSelected,this::fitView};
+        var cells=RouteToolbar.of(contentRight()-16,labels.length);
+        for(int i=0;i<labels.length;i++) {
+            int action=i+(fromCrafting?0:1);
+            addToolbarButton(labels[i],8+i*cells.cellWidth(),cells.buttonWidth(),tips[action],actions[action]);
+        }
+    }
+    private void fitView() { fitPending=true;rebuildGraph(); }
+    private void toggleBranch() {
+        var node=nodeMenuTarget;if(node==null)return;
+        checkpoint();nodeMenu=false;
+        branchEdits.toggleExpanded(node.path);rebuildGraph();
+        status=branchEdits.expanded(node.path)?"已展开下级分支":"已折叠下级分支，配方与数量保留";
     }
 
     private void addToolbarButton(String label, int x, int w, String tip, Runnable action) {
@@ -643,7 +703,8 @@ public final class RouteScreen extends Screen {
             status = "先在画布上点一个材料";
             return;
         }
-        send("stock", node.material.renderKey, "");
+        if(send("stock", node.material.renderKey, "")!=0)
+            status="仅用现有库存：该材料不再自动选配方，缺料即不可合成";
     }
 
     private MNode activeMaterial() {
@@ -804,7 +865,7 @@ public final class RouteScreen extends Screen {
             return;
         }
         if ("preview".equals(request.action)) {
-            plan = reply.plan();
+            acceptPlan(reply.plan());
             // Remember the answered signature here, not at send time: a lost or stale reply
             // must be retryable, otherwise the authoritative panel stays blank for good.
             lastPreviewSignature = request.signature;
@@ -814,7 +875,7 @@ public final class RouteScreen extends Screen {
             return;
         }
         if ("apply".equals(request.action)) {
-            plan = reply.plan();
+            acceptPlan(reply.plan());
             // The applied verdict is what a later preview would return; do not refetch it.
             lastPreviewSignature = target == null ? null : keyId(target) + ":" + Math.max(1, targetAmount);
             status = reply.message() != null && !reply.message().isBlank() ? reply.message() : planSummary();
@@ -844,7 +905,7 @@ public final class RouteScreen extends Screen {
         if (request.action.equals("query")) {
             if (status.startsWith("读取") || status.startsWith("正在读取")) status = "点击材料，在右侧选配方逐层展开";
         } else {
-            status = reply.message() == null ? "就绪" : reply.message();
+            status = request.action.equals("stock")?"仅用现有库存：该材料不再自动选配方，缺料即不可合成":reply.message() == null ? "就绪" : reply.message();
         }
         if ("lock".equals(request.action) || "ban".equals(request.action)
                 || "auto".equals(request.action) || "stock".equals(request.action)) {
@@ -867,7 +928,7 @@ public final class RouteScreen extends Screen {
         if (pending.values().stream().anyMatch(p -> ("preview".equals(p.action) || "apply".equals(p.action))
                 && signature.equals(p.signature))) return;
         int sequence = send("preview", target, "{\"amount\":" + Math.max(1, targetAmount) + "}");
-        if (sequence != 0) plan = null;
+        if (sequence != 0) acceptPlan(null);
     }
 
     /**
@@ -902,12 +963,16 @@ public final class RouteScreen extends Screen {
         send("apply", target, json.toString());
     }
 
-    /** Startup capital this plan proves for one material, or null when it needs none. */
-    private String provenStartup(String name) {        if (plan == null || !plan.proven() || name == null) return null;
-        for (var stack : plan.startup()) {
-            if (name.equals(stack.name())) return RouteGraphMath.format(stack.amount());
-        }
-        return null;
+    private void acceptPlan(RoutePlanView value) {
+        plan=value;startupByKey=Map.of();
+        if(value!=null && value.proven())try {
+            startupByKey=RouteStartupIndex.of(value.startup(),stack->stack.decode(Minecraft.getInstance().level.registryAccess()));
+        } catch(IllegalArgumentException invalid) {LOGGER.warn("Cannot decode route startup material",invalid);}
+    }
+    /** Startup capital this plan proves for one AE key, not inventory coverage. */
+    private String provenStartup(AEKey key) {
+        Long amount=startupByKey.get(key);
+        return plan!=null && plan.proven() && amount!=null?RouteGraphMath.format(amount):null;
     }
 
     private String planSummary() {
@@ -936,7 +1001,21 @@ public final class RouteScreen extends Screen {
         return text.toString();
     }
 
+    private RouteAnchor captureAnchor() {
+        if(centerPending || fitPending || root==null)return null;
+        MNode node=inside(canvasMouseX,canvasMouseY,canvasLeft,canvasTop+18,canvasWidth(),canvasBottom-canvasTop-18)
+                ?materialAt(canvasMouseX,canvasMouseY):null;
+        if(node==null)node=selectedNode==null?root:selectedNode;
+        return new RouteAnchor(node.path,node.material.key,node.x+node.w/2,node.y+node.h/2);
+    }
+    private void restoreAnchor(RouteAnchor anchor) {
+        if(anchor==null)return;
+        var node=findByPath(anchor.path());if(node==null)return;
+        var pan=anchor.restore(node.material.key,node.x+node.w/2,node.y+node.h/2,panX,panY);
+        panX=pan.x();panY=pan.y();
+    }
     private void rebuildGraph() {
+        var anchor=captureAnchor();
         materialNodes.clear();
         recipeNodes.clear();
         root = null;
@@ -953,11 +1032,12 @@ public final class RouteScreen extends Screen {
             panY = 0;
             centerPending = false;
         }
-        if (root != null && autoCenter) panX = Math.round(canvasWidth() / zoom / 2 - root.subtreeW / 2F);
-        if (root != null) applyOffsets(root);
+        if (root != null && autoCenter && anchor==null) panX = Math.round(canvasWidth() / zoom / 2 - root.subtreeW / 2F);
+        if (root != null) {applyOffsets(root);constrainGraph();}
+        restoreAnchor(anchor);
         if(fitPending && root!=null) {
             int minX=Integer.MAX_VALUE,minY=Integer.MAX_VALUE,maxX=Integer.MIN_VALUE,maxY=Integer.MIN_VALUE;
-            for(var node:materialNodes) {minX=Math.min(minX,node.x);minY=Math.min(minY,node.y);maxX=Math.max(maxX,node.x+node.w);maxY=Math.max(maxY,node.y+node.h);}
+            for(var node:materialNodes) {if(node.inlineResource)continue;minX=Math.min(minX,node.x);minY=Math.min(minY,node.y);maxX=Math.max(maxX,node.x+node.w);maxY=Math.max(maxY,node.y+node.h);}
             for(var node:recipeNodes) {minX=Math.min(minX,node.x);minY=Math.min(minY,node.y);maxX=Math.max(maxX,node.x+node.w);maxY=Math.max(maxY,node.y+node.h);}
             int availableH=canvasBottom-canvasTop-18;
             var fit=RouteLayout.fit(minX,minY,maxX,maxY,canvasWidth(),availableH);
@@ -1023,11 +1103,12 @@ public final class RouteScreen extends Screen {
             node.preview=new RouteGraphMath.Preview(matched,true,false,material.reply==null?"正在读取已应用路径样板…":"已应用的强制路径（缺失时不改用别的配方）");
         }
         node.cycle = ancestors.contains(material.key);
+        if(material.reply!=null && material.reply.stockOnly())node.preview=RouteGraphMath.preview(material.reply,null);
         if (node.cycle) {
             node.preview = new RouteGraphMath.Preview(null, false, false, "回料引用：此处连接上层材料；可行性由服务端库存与执行顺序验证");
             return node;
         }
-        if (!branchEdits.expanded(path) || depth >= 24 || node.preview.choice() == null) return node;
+        if (depth >= 24 || node.preview.choice() == null) return node;
 
         RouteView.Choice choice = node.preview.choice();
         long output = RouteGraphMath.outputAmount(choice, material.key);
@@ -1038,6 +1119,7 @@ public final class RouteScreen extends Screen {
         }
         node.recipe = new RNode(node, choice, node.preview.draft());
         recipeNodes.add(node.recipe);
+        if(!branchEdits.expanded(path))return node;
 
         long runs;
         try {
@@ -1063,7 +1145,10 @@ public final class RouteScreen extends Screen {
                 if(branchEdits.childHidden(path,i)) continue;
                 if(!branchEdits.shown(path,childPath,childMaterial.key))continue;
                 MNode child = buildNode(childMaterial, childDemand,childPath,depth + 1, ancestors);
-                if (child != null) node.children.add(child);
+                if (child != null) {
+                    child.inlineResource=RouteEmcPresentation.inline(RouteEmcPresentation.isCurrency(child.material.renderKey),child.recipe!=null,child.cycle);
+                    node.children.add(child);
+                }
             }
         } catch (Exception e) {
             node.recipeError = e.getMessage();
@@ -1080,12 +1165,13 @@ public final class RouteScreen extends Screen {
 
     private int measure(MNode node) {
         node.w = node.depth == 0 ? 100 : 86;
-        node.h = 62;
+        node.h = RouteQuantityField.NODE_HEIGHT;
         if (node.recipe != null) {
-            node.recipe.w = 28;
-            node.recipe.h = 24;
+            node.recipe.w = 18;
+            node.recipe.h = 18;
             int row = 0;
             for (var child : node.children) {
+                if(child.inlineResource)continue;
                 int width = measure(child);
                 row += width + (row == 0 ? 0 : 14);
             }
@@ -1104,35 +1190,52 @@ public final class RouteScreen extends Screen {
         if (node.recipe == null) return;
 
         RNode recipe = node.recipe;
-        recipe.autoX = left + (node.subtreeW - recipe.w) / 2;
-        recipe.autoY = top + node.h + 16;
+        var port=RouteMaterialPort.of(node.autoX,node.autoY,node.w);
+        recipe.autoX = port.x();recipe.autoY = port.y();
         recipe.x = recipe.autoX;
         recipe.y = recipe.autoY;
 
         int total = 0;
-        for (var child : node.children) total += child.subtreeW + (total == 0 ? 0 : 14);
+        for (var child : node.children) if(!child.inlineResource)total += child.subtreeW + (total == 0 ? 0 : 14);
         int childLeft = left + (node.subtreeW - total) / 2;
-        int childTop = recipe.y + recipe.h + 18;
+        int childTop = top+node.h+RouteTreeGeometry.Y_GAP;
         for (var child : node.children) {
+            if(child.inlineResource)continue;
             place(child, childLeft, childTop);
             childLeft += child.subtreeW + 14;
         }
     }
 
-    private void applyOffsets(MNode node) {
-        int[] offset = offsets.get("m:" + node.path);
-        if (offset != null) {
-            node.x = node.autoX + offset[0];
-            node.y = node.autoY + offset[1];
+    private void applyOffsets(MNode node) {applyOffsets(node,0,0);}
+    private void applyOffsets(MNode node,int parentDx,int parentDy) {
+        var offset=offsets.get("m:"+node.path);
+        int dx=parentDx+(offset==null?0:offset[0]),dy=parentDy+(offset==null?0:offset[1]);
+        node.x=node.autoX+dx;node.y=node.autoY+dy;
+        attachRecipe(node);
+        for(var child:node.children)applyOffsets(child,dx,dy);
+    }
+    private void attachRecipe(MNode node) {
+        if(node.recipe!=null) {
+            var port=RouteMaterialPort.of(node.x,node.y,node.w);
+            node.recipe.x=port.x();node.recipe.y=port.y();node.recipe.w=18;node.recipe.h=18;
         }
-        if (node.recipe != null) {
-            int[] recipeOffset = offsets.get("r:" + node.path);
-            if (recipeOffset != null) {
-                node.recipe.x = node.recipe.autoX + recipeOffset[0];
-                node.recipe.y = node.recipe.autoY + recipeOffset[1];
-            }
+    }
+    private List<RouteTreeGeometry.Box> graphGeometry() {
+        return materialNodes.stream().filter(node->!node.inlineResource).map(node->
+                new RouteTreeGeometry.Box(node.path,node.depth,node.x,node.y,node.w,node.h)).toList();
+    }
+    private void applyGeometry(List<RouteTreeGeometry.Box> boxes) {
+        for(var box:boxes) {var node=findByPath(box.path());if(node!=null) {node.x=box.x();node.y=box.y();attachRecipe(node);}}
+    }
+    private void constrainGraph() {applyGeometry(RouteTreeGeometry.constrain(graphGeometry()));}
+    private void saveGeometryOffsets() {
+        for(var node:materialNodes) {
+            if(node.inlineResource)continue;
+            var parent=node.path.equals("root")?null:findByPath(node.path.substring(0,node.path.lastIndexOf('/')));
+            var delta=RouteTreeGeometry.relative(node.x,node.y,node.autoX,node.autoY,
+                    parent==null?0:parent.x-parent.autoX,parent==null?0:parent.y-parent.autoY);
+            if(delta[0]==0 && delta[1]==0)offsets.remove("m:"+node.path);else offsets.put("m:"+node.path,delta);
         }
-        for (var child : node.children) applyOffsets(child);
     }
 
     private void requestMissing() {
@@ -1147,8 +1250,6 @@ public final class RouteScreen extends Screen {
 
     private int screenX(MNode node) { return canvasLeft + Math.round((panX + node.x) * zoom); }
     private int screenY(MNode node) { return canvasTop + 18 + Math.round((panY + node.y) * zoom); }
-    private int screenX(RNode node) { return canvasLeft + Math.round((panX + node.x) * zoom); }
-    private int screenY(RNode node) { return canvasTop + 18 + Math.round((panY + node.y) * zoom); }
     private double contentX(double mouseX) { return (mouseX - canvasLeft) / zoom - panX; }
     private double contentY(double mouseY) { return (mouseY - canvasTop - 18) / zoom - panY; }
 
@@ -1191,7 +1292,8 @@ public final class RouteScreen extends Screen {
         drawNodeTooltip(g,mx,my);
         workbench.renderDrag(g);
         drawNodeMenu(g,mx,my);
-        if(browser!=null)browser.renderDrag(g);
+        if(browser!=null) {browser.renderDrag(g);browser.renderMachineOverlay(g,mx,my);}
+        nativeMachines.renderOverlay(g,mx,my);
     }
 
     private void drawHeader(GuiGraphics g) {
@@ -1226,11 +1328,13 @@ public final class RouteScreen extends Screen {
     }
 
     private void drawCanvas(GuiGraphics g, int mx, int my) {
+        canvasMouseX=mx;canvasMouseY=my;
         int right = canvasRight - 4;
         text(g, "画布", canvasLeft + 4, canvasTop + 3, 40, TEXT);
-        String legend = "材料 ● 配方 ● 手动展开 · Ctrl+滚轮缩放 " + Math.round(zoom * 100) + "%";
-        text(g, legend, right - Math.min(330, font.width(legend)), canvasTop + 3,
-                Math.min(330, right - canvasLeft - 44), FAINT);
+        boolean legacy=com.aecraftroute.addon.config.CraftRouteConfig.scrollEditsQuantity();
+        String legend=(legacy?"Ctrl+滚轮缩放 · 滚轮数量 ":"滚轮缩放 · Shift 平移 · Alt 数量 ")+Math.round(zoom*100)+"%";
+        int legendWidth=Math.max(1,Math.min(font.width(legend),right-canvasLeft-44));
+        text(g,legend,right-legendWidth,canvasTop+3,legendWidth,FAINT);
         if (root == null) {
             text(g, "还没有可显示的生产目标", canvasLeft + 12, canvasTop + 52,
                     canvasWidth() - 24, MUTED);
@@ -1245,27 +1349,17 @@ public final class RouteScreen extends Screen {
         g.pose().scale(zoom, zoom, 1.0F);
         g.pose().translate(panX, panY, 0);
         drawEdges(g, root);
-        for (var node : materialNodes) drawMaterial(g, node, mx, my);
-        for (var recipe : recipeNodes) drawRecipe(g, recipe, mx, my);
+        for (var node : materialNodes) if(!node.inlineResource)drawMaterial(g, node, mx, my);
         g.pose().popPose();
         g.disableScissor();
     }
 
-    private void drawEdges(GuiGraphics g, MNode node) {
-        if (node.recipe != null) {
-            int x1 = node.x + node.w / 2;
-            int y1 = node.y + node.h;
-            int x2 = node.recipe.x + node.recipe.w / 2;
-            int y2 = node.recipe.y;
-            int color = edgeColor(node);
-            drawEdge(g, x1, y1, x2, y2, color, node.preview.locked() || node.preview.draft());
-            for (var child : node.children) {
-                drawEdge(g, node.recipe.x + node.recipe.w / 2, node.recipe.y + node.recipe.h,
-                        child.x + child.w / 2, child.y, color,
-                        node.preview.locked() || node.preview.draft());
-            }
+    private void drawEdges(GuiGraphics g,MNode node) {
+        for(var child:node.children)if(!child.inlineResource) {
+            drawEdge(g,node.x+node.w/2,node.y+node.h,child.x+child.w/2,child.y,
+                    edgeColor(node),node.preview.locked()||node.preview.draft());
+            drawEdges(g,child);
         }
-        for (var child : node.children) drawEdges(g, child);
     }
 
     private int edgeColor(MNode node) {
@@ -1311,7 +1405,8 @@ public final class RouteScreen extends Screen {
         boolean selected=selectedNode==node && selectedRecipe==null;
         boolean hover=inside(mx,my,sx,sy,sw,sh);
         boolean overridden=quantities.containsKey(node.path);
-        int border=node.cycle?ACCENT:selected?ACCENT:overridden?AMBER:node==root?GOLD:BORDER;
+        var visual=RouteNodeVisual.of(plan!=null && plan.proven(),node.material.reply!=null && node.material.reply.stockOnly(),!quantities.isEmpty() || !branches.isEmpty());
+        int border=node.cycle?ACCENT:selected?ACCENT:overridden?AMBER:visual.frame();
         g.fill(x,y,x+node.w,y+node.h,selected?0xFFC6C6D4:hover?0xFFD8D9E0:0xFFCBCCD4);
         bevel(g,x,y,node.w,node.h); frame(g,x,y,node.w,node.h,border);
         int slotX=x+(node.w-28)/2,slotY=y+4;
@@ -1319,25 +1414,51 @@ public final class RouteScreen extends Screen {
         appeng.client.gui.Icon.SLOT_BACKGROUND.getBlitter().dest(0,0).blit(g);
         icon(g,node.material.renderKey,1,1);
         g.pose().popPose();
-        // Quantity is a real corner overlay, not a distant text-column field.
-        String count=node.path.equals(quantityPath)?quantityText+"|":RouteGraphMath.format(node.demand);
-        float countScale=0.75F;
-        int countWidth=(int)Math.ceil(font.width(count)*countScale);
-        int countX=slotX+28-countWidth, countY=slotY+21;
-        g.fill(countX-1,countY-1,slotX+29,countY+7,0xC02B2B2B);
-        g.pose().pushPose();g.pose().translate(countX,countY,30);g.pose().scale(countScale,countScale,1);
-        g.drawString(font,count,0,0,0xFFFFFFFF,true);g.pose().popPose();
+        drawQuantityField(g,node,mx,my,visual);
         String name=font.plainSubstrByWidth(node.material.name,node.w-8);
         if(!name.equals(node.material.name))name=font.plainSubstrByWidth(node.material.name,node.w-14)+"…";
-        text(g,name,x+(node.w-font.width(name))/2,y+37,node.w-6,TEXT);
-        String state=node.cycle?"回料引用":node==root?"最终产物":node.recipe==null?"＋ 选择配方":"已展开";
-        if(overridden)state="本地覆盖数量";
-        String startup=provenStartup(node.material.name);
-        if(startup!=null) state=state+" · 起手 "+startup;
-        text(g,state,x+(node.w-font.width(state))/2,y+50,node.w-6,node.cycle?ACCENT:MUTED);
-        int portX=x+node.w-16,portY=y+4;
-        g.fill(portX,portY,portX+12,portY+12,0xFFE4DFEB);
-        frame(g,portX,portY,12,12,border);text(g,"+",portX+3,portY+2,10,GOLD);
+        text(g,name,x+(node.w-font.width(name))/2,y+RouteQuantityField.NAME_Y,node.w-6,TEXT);
+        drawNodeStatus(g,node,mx,my,border);
+        drawRecipePort(g,node,mx,my);
+    }
+
+    private void drawNodeStatus(GuiGraphics g,MNode node,int mx,int my,int border) {
+        var row=RouteNodeStatus.of(node.x,node.y,node.w);
+        boolean hover=row.contains(contentX(mx),contentY(my));
+        if(hover && !nodeMenu)g.fill(row.x(),row.y(),row.x()+row.width(),row.y()+row.height(),0xFFC6C6D4);
+        String label=RouteNodeStatus.label(node==root,node.cycle,node.recipe!=null,branchEdits.expanded(node.path),emcCostLabel(node)!=null);
+        label=font.plainSubstrByWidth(label,row.width()-2);
+        text(g,label,row.x()+(row.width()-font.width(label))/2,node.y+RouteQuantityField.STATE_Y,row.width(),node.cycle?ACCENT:MUTED);
+        g.fill(node.x+node.w/2-1,node.y+node.h-1,node.x+node.w/2+1,node.y+node.h-1+(branchEdits.expanded(node.path)?7:2),border);
+    }
+    private MNode statusAt(double mx,double my) {
+        if(suggestionsVisible() && inside(mx,my,suggestionX,suggestionY,suggestionW,suggestionH))return null;
+        var node=materialAt(mx,my);return node!=null && RouteNodeStatus.of(node.x,node.y,node.w).contains(contentX(mx),contentY(my))?node:null;
+    }
+    private void drawStatusTooltip(GuiGraphics g,MNode node,int mx,int my) {
+        String proof=plan==null?null:plan.proven()?"网络计划已证明；不表示本地编辑已应用":"网络计划："+plan.message();
+        var details=new RouteNodeStatus.Details(node.material.name,node.demand,node.cycle,node.recipe!=null,branchEdits.expanded(node.path),
+                (int)node.children.stream().filter(child->!child.inlineResource).count(),proof,provenStartup(node.material.renderKey),
+                !quantities.isEmpty()||!branches.isEmpty(),emcCostLabel(node),node.recipeError);
+        g.renderComponentTooltip(font,RouteNodeStatus.details(details).stream().map(Component::literal).map(c->(Component)c).toList(),mx,my);
+    }
+
+    private void drawQuantityField(GuiGraphics g,MNode node,int mx,int my,RouteNodeVisual visual) {
+        var field=RouteQuantityField.of(node.x,node.y,node.w);boolean editing=node.path.equals(quantityPath);
+        boolean hover=field.contains(contentX(mx),contentY(my));
+        g.fill(field.x(),field.y(),field.x()+field.width(),field.y()+field.height(),editing?0xFF303D50:visual.badgeBackground());
+        frame(g,field.x(),field.y(),field.width(),field.height(),node.cycle?CANVAS_EDGE:editing||hover?ACCENT:BORDER);
+        String count=editing?quantityText+"|":Long.toString(node.demand);
+        float size=Math.min(0.85F,(field.width()-8F)/Math.max(1,font.width(count)));
+        int tx=field.x()+Math.round((field.width()-font.width(count)*size)/2),ty=field.y()+4;
+        if(editing && quantityFresh)g.fill(field.x()+2,field.y()+2,field.x()+field.width()-2,field.y()+field.height()-2,0xFF466887);
+        g.pose().pushPose();g.pose().translate(tx,ty,30);g.pose().scale(size,size,1);
+        g.drawString(font,count,0,0,node.cycle?0xFFAAAAAA:editing?0xFFFFFFFF:visual.amountColor(),false);g.pose().popPose();
+    }
+    private MNode quantityAt(double mx,double my) {
+        if(suggestionsVisible() && inside(mx,my,suggestionX,suggestionY,suggestionW,suggestionH))return null;
+        var node=materialAt(mx,my);
+        return node!=null && RouteQuantityField.of(node.x,node.y,node.w).contains(contentX(mx),contentY(my))?node:null;
     }
 
     private long forcedBatches(RNode recipe) {return RouteGraphMath.runs(Math.max(1,recipe.parent.demand),RouteGraphMath.outputAmount(recipe.choice,recipe.parent.material.key));}
@@ -1347,20 +1468,26 @@ public final class RouteScreen extends Screen {
         // Native AE2 pattern identities do not identify a JEI machine. Never guess from inputs or outputs.
         return recipe.choice.id().startsWith("jei:")?recipe.choice.id().substring(4):null;
     }
-    private boolean recipeMachineHit(RNode recipe,double mx,double my) {
-        return inside(contentX(mx),contentY(my),recipe.x+5,recipe.y+3,18,18);
+    private List<RouteView.PatternSource> recipeSources(RNode recipe) {
+        return RoutePatternPresentation.sources(recipe.choice,recipe.parent.material.reply);
     }
-    private void drawRecipe(GuiGraphics g,RNode recipe,int mx,int my) {
-        int sx=screenX(recipe),sy=screenY(recipe);
-        int sw=Math.round(recipe.w*zoom),sh=Math.round(recipe.h*zoom);
-        if(sx+sw<canvasLeft || sx>canvasRight || sy+sh<canvasTop || sy>canvasBottom)return;
-        boolean selected=selectedRecipe==recipe;
-        int x=recipe.x,y=recipe.y;
-        g.fill(x,y,x+recipe.w,y+recipe.h,selected?0xFFC6C6D4:0xFFADB0C4);
-        bevel(g,x,y,recipe.w,recipe.h);
-        frame(g,x,y,recipe.w,recipe.h,selected?ACCENT:BORDER);
-        if(browser!=null)browser.renderMachine(recipeMachineId(recipe),g,x+5,y+3,(int)contentX(mx),(int)contentY(my));
-        else text(g,"?",x+11,y+8,8,MUTED);
+    private void drawRecipePort(GuiGraphics g,MNode node,int mx,int my) {
+        var port=RouteMaterialPort.of(node.x,node.y,node.w);int x=port.x(),y=port.y();
+        g.fill(x,y,x+18,y+18,node.recipe!=null && selectedRecipe==node.recipe?0xFFC6C6D4:0xFFE4DFEB);frame(g,x,y,18,18,BORDER);
+        if(node.recipe==null) {g.renderItem(appeng.core.definitions.AEItems.BLANK_PATTERN.stack(),x+1,y+1);return;}
+        var recipe=node.recipe;
+        boolean blocked=nodeMenu || draggedMaterial!=null || workbench!=null && workbench.contains(mx,my);
+        int hx=blocked?-1000000:(int)contentX(mx),hy=blocked?-1000000:(int)contentY(my);
+        if(recipeMachineId(recipe)==null)nativeMachines.draw(g,node.path,recipeSources(recipe),x,y,hx,hy,ticks);
+        else if(browser!=null)browser.renderMachine(recipeMachineId(recipe),g,x,y,hx,hy);
+        else g.renderItem(appeng.core.definitions.AEItems.PROCESSING_PATTERN.stack(),x+1,y+1);
+    }
+    private String emcCostLabel(MNode node) {
+        var draft=branchDrafts.get(node.path);
+        if(RouteEmcRules.isEmc(draft))return "EMC · 转换桌 "+RouteEmcRules.cost(RouteEmcRules.unit(draft),node.demand);
+        var costs=node.children.stream().filter(child->child.inlineResource)
+                .map(child->child.material.name+" "+RouteGraphMath.format(child.demand)).toList();
+        return costs.isEmpty()?null:"网络 "+String.join(" / ",costs);
     }
 
     private void drawNodeTooltip(GuiGraphics g,int mx,int my) {
@@ -1369,7 +1496,8 @@ public final class RouteScreen extends Screen {
         if(recipe!=null) {
             var lines=new ArrayList<Component>();
             var value=branchDrafts.get(recipe.parent.path);
-            if(browser!=null) lines.addAll(browser.machineTooltip(recipeMachineId(recipe)));
+            if(recipeMachineId(recipe)==null)lines.addAll(RouteNativePatternIcon.tooltip(recipeSources(recipe)));
+            else if(browser!=null) lines.addAll(browser.machineTooltip(recipeMachineId(recipe)));
             else lines.add(Component.literal("JEI 未启用，设备未知"));
             lines.add(Component.literal("路径："+recipe.parent.path));
             if(RouteEmcRules.isEmc(value))lines.add(Component.literal("EMC 消耗："+RouteEmcRules.cost(RouteEmcRules.unit(value),recipe.parent.demand)));
@@ -1378,24 +1506,23 @@ public final class RouteScreen extends Screen {
                 if(recipe.draft)lines.add(Component.literal("JEI 草稿尚未编码"));
             }
             if(!quantities.isEmpty())lines.add(Component.literal("含本地数量覆盖：此批次仅为画布估算，不提交服务端；实际按最终目标量校验"));
-            lines.add(Component.literal("左键拖动；图标单击查询机器；边框单击移除菜单；右键选择配方"));
+            lines.add(Component.literal("机器图标：配方详情；悬停展开全部机器；节点拖动会带动下级；右键选择配方"));
             g.renderComponentTooltip(font,lines,mx,my);
             return;
         }
         var node=materialAt(mx,my);
         if(node==null)return;
         var lines=new ArrayList<Component>();
+        if(quantityAt(mx,my)!=null) {
+            lines.add(Component.literal(node.material.name+" · 数量 "+(node.path.equals(quantityPath)?quantityText:node.demand)));
+            lines.add(Component.literal(node.cycle?"回料引用数量只读":"点击输入；滚轮按批，Shift 单个；Ctrl+滚轮缩放"));
+            lines.add(Component.literal("Enter 确认，Esc 取消；非最终产物的数量覆盖仅为本地编辑"));
+            g.renderComponentTooltip(font,lines,mx,my);return;
+        }
+        if(statusAt(mx,my)!=null) {drawStatusTooltip(g,node,mx,my);return;}
         lines.add(Component.literal(node.material.name));
         lines.add(Component.literal("需求："+node.demand+(node.material.renderKey instanceof AEFluidKey?" mB":" 个")));
-        if(quantities.containsKey(node.path)) lines.add(Component.literal("本地覆盖，未经服务端校验；上游批数未变"));
-        if (plan != null) {
-            String startup = provenStartup(node.material.name);
-            lines.add(Component.literal(plan.proven() ? "权威校验：已证明可行" : "权威校验：" + plan.message()));
-            if (startup != null) lines.add(Component.literal("起手只需要：" + startup));
-        }
-        lines.add(Component.literal("单击：清下级/删节点菜单；＋ / 右键：选择配方；左键拖动：移动节点"));
-        lines.add(Component.literal("中键：输入数量；滚轮：±1 批（Shift 为 ±1 个）"));
-        if(node.recipeError!=null)lines.add(Component.literal(node.recipeError));
+        lines.add(Component.literal("底部状态行：悬停详情 / 点击分支菜单"));
         g.renderComponentTooltip(font,lines,mx,my);
     }
 
@@ -1496,8 +1623,13 @@ public final class RouteScreen extends Screen {
         long out = RouteGraphMath.outputAmount(recipe.choice, node.material.key);
         text(g, "产出：" + RouteGraphMath.format(out) + "× " + node.material.name
                 + " / 单次样板", x, canvasTop + 44, max, TEXT);
-        text(g, "输入原料", x, canvasTop + 58, max, MUTED);
-        int y = canvasTop + 71;
+        var sources=recipeSources(recipe);
+        String origin=sources.isEmpty()?"样板来源：暂无可见在线供应器":
+                "样板来源："+sources.getFirst().name()+" · 槽 "+(sources.getFirst().slot()+1)
+                        +(sources.size()>1?"（另有 "+(sources.size()-1)+" 处）":"");
+        text(g,origin,x,canvasTop+58,max,MUTED);
+        text(g, "输入原料", x, canvasTop + 76, max, MUTED);
+        int y = canvasTop + 89;
         int lineMax = inspectorBottom() - 46;
         for (var stack : recipe.choice.inputs()) {
             if (y > lineMax) { text(g, "…还有更多原料", x, y, max, FAINT); break; }
@@ -1726,6 +1858,8 @@ public final class RouteScreen extends Screen {
     @Override
     public boolean mouseClicked(double mx, double my, int button) {
         if (!usable()) return super.mouseClicked(mx,my,button);
+        if(nativeMachines.click(mx,my,button))return true;
+        if(browser!=null && browser.clickMachineOverlay(mx,my,button))return true;
         if(nodeMenu) {
             for(var hit:nodeMenuHits)if(inside(mx,my,hit.x1,hit.y1,hit.x2-hit.x1,hit.y2-hit.y1)) {if(button==0)hit.action.run();return true;}
             if(inside(mx,my,nodeMenuLeft,nodeMenuTop,nodeMenuWidth,nodeMenuHeight))return true;
@@ -1741,7 +1875,6 @@ public final class RouteScreen extends Screen {
             return true;
         }
         if(mx>=contentRight())return false;
-        if (quantityPath != null) cancelQuantity();
         if (button == 2) {
             MNode hit = materialAt(mx, my);
             if (hit != null) startQuantityEdit(hit);
@@ -1750,6 +1883,15 @@ public final class RouteScreen extends Screen {
         if (button != 0 && button != 1) return false;
         // A short inspector can put the picker over its footer: the visible modal wins hit testing.
         if(nativeRecipeVisible() && browser.pickingRecipe() && browser.click(mx,my,button,this::expandDraft))return true;
+        var quantity=quantityAt(mx,my);
+        if(button==0 && quantity!=null) {
+            if(!quantity.path.equals(quantityPath))startQuantityEdit(quantity);return true;
+        }
+        if(quantityPath!=null)cancelQuantity();
+        var branchStatus=statusAt(mx,my);
+        if(button==0 && branchStatus!=null) {
+            openNodeMenu(branchStatus,mx,my,false);menuSection(RouteNodeMenu.Page.BRANCH);return true;
+        }
 
         if (suggestionsVisible() && inside(mx,my,suggestionX+suggestionW-40,suggestionY+2,18,14)) {
             suggestionPage = Math.max(0, suggestionPage - 1); return true;
@@ -1790,17 +1932,21 @@ public final class RouteScreen extends Screen {
         }
 
         MNode material = materialAt(mx, my);
-        RNode recipe = recipeAt(mx, my);
         if (material != null) {
             jeiTab=true;
             choiceScroll=0;
             selectedNode = material;
             selectedKey = material.material.key;
             selectedRecipe = null;
+            if(recipePortHit(material,mx,my) && button==0 && material.recipe!=null) {
+                selectedRecipe=material.recipe;return true;
+            }
             if (RouteNodeInteraction.press(button,recipePortHit(material,mx,my))==RouteNodeInteraction.Action.RECIPES) {
                 openNodeMenu(material,mx,my,true);
             } else {
+                nativeMachines.clearOverlay();if(browser!=null)browser.clearMachineOverlay();
                 draggedMaterial = material;
+                dragGeometry=graphGeometry();
                 nodeDragMoved=false;
                 pendingDragState = captureState();
                 dragMouseX = mx;
@@ -1809,21 +1955,6 @@ public final class RouteScreen extends Screen {
                 dragNodeY = material.y;
                 setDragging(true);
             }
-            return true;
-        }
-        if (recipe != null) {
-            if(button==1) {openNodeMenu(recipe.parent,mx,my,true);return true;}
-            selectedNode = recipe.parent;
-            selectedKey = recipe.parent.material.key;
-            selectedRecipe = recipe;
-            draggedRecipe = recipe;
-            nodeDragMoved=false;
-            pendingDragState = captureState();
-            dragMouseX = mx;
-            dragMouseY = my;
-            dragNodeX = recipe.x;
-            dragNodeY = recipe.y;
-            setDragging(true);
             return true;
         }
         if (inside(mx, my, canvasLeft, canvasTop + 18, canvasWidth(), canvasBottom - canvasTop - 18)) {
@@ -1844,7 +1975,7 @@ public final class RouteScreen extends Screen {
         double x = contentX(mx), y = contentY(my);
         for (int i = materialNodes.size() - 1; i >= 0; i--) {
             var node = materialNodes.get(i);
-            if (inside(x, y, node.x, node.y, node.w, node.h)) return node;
+            if (!node.inlineResource && inside(x, y, node.x, node.y, node.w, node.h)) return node;
         }
         return null;
     }
@@ -1859,18 +1990,14 @@ public final class RouteScreen extends Screen {
         return null;
     }
 
-    private boolean recipePortHit(MNode node, double mx, double my) {
-        double x = contentX(mx);
-        double y = contentY(my);
-        double portX = node.x + node.w - 16;
-        double portY = node.y + 4;
-        return x >= portX && x < portX + 12 && y >= portY && y < portY + 12;
+    private boolean recipePortHit(MNode node,double mx,double my) {
+        return RouteMaterialPort.of(node.x,node.y,node.w).contains(contentX(mx),contentY(my));
     }
 
     @Override
     public boolean mouseDragged(double mx, double my, int button, double dx, double dy) {
         if(workbench!=null && workbench.drag(mx,my))return true;
-        if(draggedMaterial==null && draggedRecipe==null && !panning && nativeRecipeVisible() && browser.drag(mx,my,button,dx,dy))return true;
+        if(draggedMaterial==null && !panning && nativeRecipeVisible() && browser.drag(mx,my,button,dx,dy))return true;
         if (wireFrom != null) {
             wireX = mx;
             wireY = my;
@@ -1879,15 +2006,8 @@ public final class RouteScreen extends Screen {
         if (draggedMaterial != null) {
             nodeDragMoved=RouteNodeInteraction.moved(nodeDragMoved,mx-dragMouseX,my-dragMouseY);
             if(!nodeDragMoved)return true;
-            draggedMaterial.x = dragNodeX + (int) Math.round((mx - dragMouseX) / zoom);
-            draggedMaterial.y = dragNodeY + (int) Math.round((my - dragMouseY) / zoom);
-            return true;
-        }
-        if (draggedRecipe != null) {
-            nodeDragMoved=RouteNodeInteraction.moved(nodeDragMoved,mx-dragMouseX,my-dragMouseY);
-            if(!nodeDragMoved)return true;
-            draggedRecipe.x = dragNodeX + (int) Math.round((mx - dragMouseX) / zoom);
-            draggedRecipe.y = dragNodeY + (int) Math.round((my - dragMouseY) / zoom);
+            applyGeometry(RouteTreeGeometry.drag(dragGeometry,draggedMaterial.path,
+                    (int)Math.round((mx-dragMouseX)/zoom),(int)Math.round((my-dragMouseY)/zoom)));
             return true;
         }
         if (panning) {
@@ -1922,29 +2042,9 @@ public final class RouteScreen extends Screen {
                 draggedMaterial=null;pendingDragState=null;
                 return true;
             }
-            if (draggedMaterial.x != dragNodeX || draggedMaterial.y != dragNodeY) pushUndo(pendingDragState);
-            int ox = draggedMaterial.x - draggedMaterial.autoX;
-            int oy = draggedMaterial.y - draggedMaterial.autoY;
-            offsets.put("m:" + draggedMaterial.path, new int[]{ox, oy});
+            if(!graphGeometry().equals(dragGeometry))pushUndo(pendingDragState);
+            saveGeometryOffsets();dragGeometry=List.of();
             draggedMaterial = null;
-            pendingDragState = null;
-            return true;
-        }
-        if (draggedRecipe != null) {
-            nodeDragMoved=RouteNodeInteraction.moved(nodeDragMoved,mx-dragMouseX,my-dragMouseY);
-            var action=RouteNodeInteraction.release(nodeDragMoved,recipeMachineHit(draggedRecipe,dragMouseX,dragMouseY));
-            if(action!=RouteNodeInteraction.Action.NONE) {
-                if(action==RouteNodeInteraction.Action.MACHINE && browser!=null)browser.showMachine(recipeMachineId(draggedRecipe));
-                else openNodeMenu(draggedRecipe.parent,mx,my,false);
-                draggedRecipe=null;
-                pendingDragState=null;
-                return true;
-            }
-            if (draggedRecipe.x != dragNodeX || draggedRecipe.y != dragNodeY) pushUndo(pendingDragState);
-            int ox = draggedRecipe.x - draggedRecipe.autoX;
-            int oy = draggedRecipe.y - draggedRecipe.autoY;
-            offsets.put("r:" + draggedRecipe.parent.path, new int[]{ox, oy});
-            draggedRecipe = null;
             pendingDragState = null;
             return true;
         }
@@ -1966,6 +2066,8 @@ public final class RouteScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mx, double my, double scrollX, double scrollY) {
+        if(nativeMachines.scroll(mx,my,scrollY))return true;
+        if(browser!=null && browser.scrollMachineOverlay(mx,my,scrollY))return true;
         if (suggestionsVisible() && inside(mx,my,suggestionX,suggestionY,suggestionW,suggestionH)) {
             if (scrollY != 0) suggestionPage = Math.max(0, Math.min(suggestionPages()-1,
                     suggestionPage + (scrollY < 0 ? 1 : -1)));
@@ -1983,25 +2085,26 @@ public final class RouteScreen extends Screen {
             return true;
         }
         if (inside(mx, my, canvasLeft, canvasTop, canvasWidth(), canvasBottom - canvasTop)) {
-            if(!hasControlDown() && (scrollX!=0 || hasShiftDown() && materialAt(mx,my)==null)) {
-                autoCenter=false;
-                panX+=(int)Math.round((scrollX!=0?scrollX:scrollY)*18);
-                return true;
+            var hit=materialAt(mx,my);
+            if(RouteQuantityField.wheelEdits(quantityAt(mx,my)!=null,hasControlDown(),scrollX!=0,hit!=null && hit.cycle)) {
+                if(scrollY!=0)adjustQuantity(hit,scrollY>0?1:-1,hasShiftDown());return true;
             }
-            if(scrollY==0)return true;
-            if (!hasControlDown()) {
-                MNode hit = materialAt(mx, my);
-                if (hit != null && !hit.cycle) { adjustQuantity(hit, scrollY > 0 ? 1 : -1, hasShiftDown()); return true; }
+            var intent=RouteWheelIntent.of(hasControlDown(),hasShiftDown(),hasAltDown(),hit!=null && !hit.cycle,
+                    scrollX!=0,com.aecraftroute.addon.config.CraftRouteConfig.scrollEditsQuantity());
+            if(intent==RouteWheelIntent.QUANTITY) {
+                if(scrollY!=0)adjustQuantity(hit,scrollY>0?1:-1,hasShiftDown());return true;
             }
-            autoCenter = false;
-            if (hasControlDown()) {
-                double cx = contentX(mx), cy = contentY(my);
-                float next = zoom + (scrollY > 0 ? 0.1F : -0.1F);
-                zoom = Math.max(0.25F, Math.min(2.0F, next));
-                panX = (int) Math.round((mx - canvasLeft) / zoom - cx);
-                panY = (int) Math.round((my - canvasTop - 18) / zoom - cy);
-            } else {
-                panY += scrollY > 0 ? 18 : -18;
+            autoCenter=false;
+            if(intent==RouteWheelIntent.PAN) {
+                if(scrollX==0 && !hasShiftDown() && com.aecraftroute.addon.config.CraftRouteConfig.scrollEditsQuantity())
+                    panY+=(int)Math.round(scrollY*18);
+                else panX+=(int)Math.round((scrollX!=0?scrollX:scrollY)*18);
+            }
+            else if(scrollY!=0) {
+                double cx=contentX(mx),cy=contentY(my);
+                zoom=Math.max(0.25F,Math.min(2.0F,zoom+(scrollY>0?0.1F:-0.1F)));
+                panX=(int)Math.round((mx-canvasLeft)/zoom-cx);
+                panY=(int)Math.round((my-canvasTop-18)/zoom-cy);
             }
             return true;
         }
@@ -2023,10 +2126,17 @@ public final class RouteScreen extends Screen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if(keyCode==GLFW.GLFW_KEY_ESCAPE && nodeMenu) {backNodeMenu();return true;}
         if(workbench!=null && (workbench.keyPressed(keyCode,scanCode,modifiers) || workbench.focused()))return true;
         if (quantityPath != null && (itemId == null || !itemId.isFocused())) {
-            if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) commitQuantity();
-            else if (keyCode == GLFW.GLFW_KEY_ESCAPE) cancelQuantity();
+            if(keyCode==GLFW.GLFW_KEY_A && hasControlDown())quantityFresh=true;
+            else if(keyCode==GLFW.GLFW_KEY_V && hasControlDown()) {
+                String clipboard=Minecraft.getInstance().keyboardHandler.getClipboard().strip();
+                if(clipboard.matches("[0-9]{1,15}")) {quantityText=clipboard;quantityFresh=false;}
+                else status="数量只接受 1 至 15 位数字";
+            }
+            else if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) commitQuantity();
+            else if (keyCode == GLFW.GLFW_KEY_ESCAPE) {cancelQuantity();status="已取消数量编辑";}
             else if (keyCode == GLFW.GLFW_KEY_BACKSPACE) {
                 if (quantityFresh) { quantityText = ""; quantityFresh = false; }
                 else if (!quantityText.isEmpty()) quantityText = quantityText.substring(0, quantityText.length() - 1);
@@ -2035,7 +2145,6 @@ public final class RouteScreen extends Screen {
         }
         if(itemId==null || !itemId.isFocused()) {
             if(nativeRecipeVisible() && (workbench==null || !workbench.hovered()) && browser.key(keyCode,scanCode))return true;
-            if(keyCode==GLFW.GLFW_KEY_ESCAPE && nodeMenu) {nodeMenu=false;return true;}
             if(keyCode==GLFW.GLFW_KEY_DELETE && selectedNode!=null) {
                 openNodeMenu(selectedNode,screenX(selectedNode),screenY(selectedNode),false);return true;
             }
@@ -2167,7 +2276,7 @@ public final class RouteScreen extends Screen {
         RouteGraphMath.Preview preview;
         RNode recipe;
         final List<MNode> children = new ArrayList<>();
-        boolean cycle;
+        boolean cycle,inlineResource;
         String recipeError;
         int x, y, w, h, autoX, autoY, subtreeW;
 

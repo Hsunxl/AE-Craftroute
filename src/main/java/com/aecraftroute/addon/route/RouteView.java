@@ -24,7 +24,11 @@ public final class RouteView {
             throw new IllegalArgumentException("材料数据无法读取", e);
         }
     }
-    public record Choice(String id, List<Stack> inputs, List<Stack> outputs, boolean alternatives) {}
+    public record PatternSource(String name,Stack icon,String location,int slot) {}
+    public record Choice(String id, List<Stack> inputs, List<Stack> outputs, boolean alternatives,List<PatternSource> sources) {
+        public Choice {sources=sources==null?List.of():List.copyOf(sources);}
+        public Choice(String id,List<Stack> inputs,List<Stack> outputs,boolean alternatives) {this(id,inputs,outputs,alternatives,List.of());}
+    }
     public record PathChoice(String path,String choiceId) {}
     /** Authoritative confirm-menu request; unlike private client menu fields, this is synchronized. */
     public record RequestTarget(String key,long amount) {}

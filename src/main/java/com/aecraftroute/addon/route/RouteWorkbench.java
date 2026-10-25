@@ -101,17 +101,7 @@ public final class RouteWorkbench {
         player.getInventory().setChanged();menu.broadcastChanges();
         return "已放入背包 "+moved+" 张样板；放不下的仍留在缓存";
     }
-    private static List<PatternContainer> activeProviders(IGrid grid) {
-        var set=Collections.newSetFromMap(new IdentityHashMap<PatternContainer,Boolean>());
-        for(Class<?> machine:grid.getMachineClasses())if(PatternContainer.class.isAssignableFrom(machine))
-            collect(grid,machine.asSubclass(PatternContainer.class),set);
-        var result=new ArrayList<>(set);
-        result.sort(Comparator.comparingLong(PatternContainer::getTerminalSortOrder));
-        return result;
-    }
-    private static <T extends PatternContainer> void collect(IGrid grid,Class<T> machine,Set<PatternContainer> result) {
-        for(var provider:grid.getActiveMachines(machine))if(RouteProviderWindow.visible(provider.getGrid()==grid,provider.isVisibleInTerminal(),provider.getTerminalPatternInventory().size()))result.add(provider);
-    }
+    private static List<PatternContainer> activeProviders(IGrid grid) {return RouteProviders.active(grid);}
     public static String upload(ServerPlayer player,AEBaseMenu menu,IGrid grid,Upload upload) {
         if(upload==null || upload.provider()==null)throw new IllegalArgumentException("未选择供应器");
         var cache=cache(player);var entry=validateCacheSlot(cache,upload.cacheSlot(),upload.token());

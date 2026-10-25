@@ -57,4 +57,12 @@ class RouteBranchEditsTest {
         e.showMaterial("iron");
         assertFalse(e.materialHidden("iron"));
     }
+    @Test void foldingRoundTripPreservesFiltersAndUndo() {
+        var e=new RouteBranchEdits();e.reveal("root","iron",false);e.hide("root/a");
+        var before=e.snapshot();e.toggleExpanded("root");var folded=e.snapshot();
+        assertFalse(e.expanded("root"));e.toggleExpanded("root");assertEquals(before,e.snapshot());
+        e.restore(folded);assertFalse(e.expanded("root"));
+        assertFalse(e.shown("root","root/a","iron"));assertFalse(e.shown("root","root/b","gold"));
+        e.restore(before);assertTrue(e.expanded("root"));
+    }
 }

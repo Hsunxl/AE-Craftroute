@@ -532,6 +532,15 @@ public final class SelftestHarness {
                         com.aecraftroute.addon.route.RouteView.Stack.of(key, 1, regs).key(),
                         identity, key.getDisplayName().getString()));
             }
+            var identities=nodes.stream().map(com.aecraftroute.addon.route.RouteApply.Node::choiceId).collect(java.util.stream.Collectors.toSet());
+            var origins=com.aecraftroute.addon.route.RoutePatternSources.find(grid,level,identities);
+            for(String identity:identities) {
+                var rows=origins.get(identity);
+                if(rows==null || rows.isEmpty() || rows.getFirst().icon()==null || rows.getFirst().location().isBlank())
+                    fail("native pattern source mapping missing: "+identity);
+            }
+            LOG.info("[SELFTEST] native pattern sources: providers={} patterns={}",
+                    com.aecraftroute.addon.route.RouteProviders.active(grid).size(),origins.size());
             var limits = new com.aecraftroute.addon.planner.ProductionPlanner.Limits(6000, 500_000_000L);
             var clean = com.aecraftroute.addon.route.RouteApply.apply(grid,
                     new com.aecraftroute.addon.route.RoutePolicy<AEKey>(java.util.Map.of()),
