@@ -317,3 +317,11 @@
 - 交付与竞态：`partial` 118、`overestimate` 118、`advanced-overestimate` 119、`stock-race` 122、`advanced-stock-race` 123、`rejectonce` 118 —— 部分交付、产量高估、库存抢占与「拒一次再接受」都按真实机器行为收尾。
 - scaled 家族补齐：`scaled-native-plan` 5、`scaled-strict-roundtrip` 3、`scaled-molecular-execution` 13（均带 `-PextendedAePlusSelftest`）—— 连同此前 `scaled-advanced` 19、`scaled-processing-execution` 55、`scaled-processing-plain-execution` 55，白名单里七个 scaled 场景在最终树全绿。
 - 说明：这些是行为回归证据，不等于 A1（真实 ATM10 最大画布）、A2（其余尺寸/并发组合）或 A5（整包容量）已验收；客户端视觉交互仍未触碰。
+### 2026-10-27 发布 local.60（提交 + Release + 本地实装）
+
+- 版本：`gradle.properties` mod_version 1.13.19-local.59-dev → **1.13.19-local.60-dev**；构建 `build/libs/aecraftroute-1.13.19-local.60-dev_neoforge_1.21.1.jar`（634,105 B）+ sources（318,591 B）+ `SHA256SUMS-local60.txt`。
+- 门禁复跑：`build`（含 test + routeFunctionalTest）两套各 606 tests / 0 failures / 0 errors。
+- 提交：`0c73d3f`（22 files, +978/-68）推到 `wip/planner-vm-ui-2026-10-25`，tag `v1.13.19-local.60-dev` 已推。**个人文档 `docs/codex context.md` 保持未跟踪，未入仓库。**
+- Release：<https://github.com/Hsunxl/AE-Craftroute/releases/tag/v1.13.19-local.60-dev>（Pre-release，3 附件齐全，中文正文含原因/加固/验证/限制）。首次 `gh release create` 遇 graphql EOF，重试成功（无重复发布）。
+- 本地实装：`D:/pcl/versions/ATM10/mods/` 已删除 local.59 jar、放入 local.60 jar，sha256 与发布附件一致（`0bd5473d…af274`）。
+
