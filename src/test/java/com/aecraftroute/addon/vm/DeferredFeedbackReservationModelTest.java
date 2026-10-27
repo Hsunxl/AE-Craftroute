@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Design proof only. The production growth mixins do not yet use this ledger. */
+/** Counter-model tests for the ledger used by both production growth CPU bridges. */
 class DeferredFeedbackReservationModelTest {
     final BenchAEKey alternative=BenchAEKey.of("deferred_alternative"),feedback=BenchAEKey.of("deferred_final");
     IPatternDetails consumer(){return consumer(1,1,1,false);}
@@ -173,6 +173,38 @@ class DeferredFeedbackReservationModelTest {
         assertEquals(expected,ledger.receive(expected));
         ledger.releaseWhenNoConsumers();
         assertEquals(2,ledger.delivered);assertEquals(0,ledger.waiting);assertEquals(0,ledger.held);
+    }
+
+    @Test void unresolvableCandidateSlotsHoldCreditInsteadOfCancellingTheJob() {
+        var broken=new IPatternDetails() {
+            public AEItemKey getDefinition(){return null;}
+            public List<GenericStack> getOutputs(){return List.of(new GenericStack(feedback,1));}
+            public IInput[] getInputs(){return new IInput[]{null};}
+        };
+        assertThrows(IllegalArgumentException.class,()->DeferredFeedbackReservation.potentialInput(
+                java.util.Map.of(broken,1L),Long::longValue,feedback,null));
+        assertEquals(Long.MAX_VALUE,DeferredFeedbackReservation.pendingInputOrUnknown(
+                java.util.Map.of(broken,1L),Long::longValue,feedback,null));
+        var accounting=new DeferredFeedbackReservation();accounting.restore(2,4,4);
+        assertEquals(new DeferredFeedbackReservation.Release(0,0),
+                accounting.offerRelease(Long.MAX_VALUE,4,2,4));
+        assertEquals(2,accounting.held());
+    }
+
+    @Test void savedTaskCountsBeyondTheDemandCapAreRejectedBeforeTheyCanWedgeRelease() {
+        var pattern=consumer();
+        DeferredFeedbackReservation.requireSaneRuns(java.util.Map.of(pattern,3L),Long::longValue);
+        assertThrows(IllegalArgumentException.class,()->DeferredFeedbackReservation.requireSaneRuns(
+                java.util.Map.of(pattern,Long.MAX_VALUE),Long::longValue));
+        assertThrows(IllegalArgumentException.class,()->DeferredFeedbackReservation.requireSaneRuns(
+                java.util.Map.of(pattern,Long.MAX_VALUE,consumer(1,1,1,true),Long.MAX_VALUE),Long::longValue));
+        assertThrows(IllegalArgumentException.class,()->DeferredFeedbackReservation.requireSaneRuns(
+                java.util.Map.of(pattern,-1L),Long::longValue));
+        assertThrows(IllegalArgumentException.class,()->DeferredFeedbackReservation.requireSaneRuns(
+                java.util.Map.of(pattern,DeferredFeedbackReservation.MAX_TASK_RUNS+1),Long::longValue));
+        // Exactly capped counts stay loadable: the cap bounds demand, not job size in bytes.
+        DeferredFeedbackReservation.requireSaneRuns(java.util.Map.of(pattern,DeferredFeedbackReservation.MAX_TASK_RUNS),Long::longValue);
+        DeferredFeedbackReservation.requireSaneRuns(java.util.Map.of(),Long::longValue);
     }
 
     @Test void consumptionSnapshotSurvivesProviderClearingInputCounters() {

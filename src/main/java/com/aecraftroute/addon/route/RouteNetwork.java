@@ -178,16 +178,14 @@ public final class RouteNetwork {
                                   appeng.api.networking.IGrid grid,RoutePolicy<AEKey> base) {
         var ticket=PLANNING.replace(player.getUUID(),request.sequence());
         if(ticket==null)return;
-        long amount=1;var nodes=new ArrayList<RouteApply.Node>();
+        long amount=1;java.util.List<RouteApply.Node> nodes=java.util.List.of();
         try {
-            var json=GSON.fromJson(request.argument(),com.google.gson.JsonObject.class);
-            if(json!=null && json.has("amount"))amount=json.get("amount").getAsLong();
-            if(amount<=0)throw new IllegalArgumentException("目标数量必须大于零");
-            if(json!=null && json.has("nodes"))for(var value:json.getAsJsonArray("nodes")) {
-                var e=value.getAsJsonObject();
-                nodes.add(new RouteApply.Node(e.has("k")?e.get("k").getAsString():null,e.has("c")?e.get("c").getAsString():null,
-                        e.has("n")?e.get("n").getAsString():null,e.has("p")?e.get("p").getAsString():null));
-            }
+            // The argument is untrusted client text: parse it with explicit type checks so a
+            // malformed or edited request is refused by its own message instead of surfacing
+            // as a raw Gson failure behind the generic "操作失败" reply.
+            var decoded=RouteCanvasPayload.decode(request.argument());
+            amount=decoded.amount();nodes=decoded.nodes();
+            RouteRequestRules.requirePlanAmount(amount);
             if(request.key()==null)throw new IllegalArgumentException("先选择目标材料");
             boolean apply="apply".equals(request.action());
             RouteRequestRules.requirePlanningEnabled(request.action(),com.aecraftroute.addon.config.CraftRouteConfig.isProxyEnabled());

@@ -211,9 +211,109 @@
 - 排空后再发起真实规划请求，成功取得certified plan并正常提交AE2 CPU，实际分子装配室交付铁块1个，CPU释放，fresh receipt PASS21ticks。日志与独立回执 `build/audit-selftest-planning-load.*`。多个成功预览没有自动提交生产任务，只有恢复请求真正提交。
 - 完整离线 `test routeFunctionalTest build -x productionBenchmark`成功，测试数仍各579，diff检查通过。该结果直接证实2线程/8队列在32请求突发下会拒绝部分任务，不声称容量足够；证明的是typed背压、取消、终止与后续恢复，不代替真实全包大网容量测量。未操作客户端。
 
+## 2026-10-27：D15 拒绝缺失延迟反馈计数的损坏存档
+
+- 只读复核发现两类 CPU 的新协议都无条件 `getLong("aecraftrouteDeferredHeld")`；若 marker 仍 true、held key 缺失或非 LONG，NBT API 默认读 0，账本可恢复成零信用而 CPU 库存/`waitingFor` 尚有实际保留反馈。
+- AE2 `GrowthCpuMixin` 与 AdvancedAE `AdvancedGrowthCpuMixin` 在恢复时现要求该 key 存在且类型为 `Tag.TAG_LONG`，否则进入已有 invalid-save 取消路径；不合规任务不会以零信用继续。未注册第三方 requester 与 certified 执行隔离不变。
+- `legacy-feedback-corrupt` 与 `legacy-feedback-advanced-corrupt` 真实隔离 NeoForge 服务端场景现删除该字段后都 PASS：各确认 CPU/link 取消、requester 收 0、ME 只归还真实 held=2；异常日志含 `Missing or invalid deferred feedback held count`。另复验有效 `legacy-feedback-reload`（AE2，held=2，50 ticks）与 `legacy-feedback-advanced-reload`（AdvancedAE，held=2，47 ticks）均仍成功完成有效 NBT 往返与交付。
+- 完整离线门禁 `test routeFunctionalTest build -x productionBenchmark` BUILD SUCCESSFUL，两个测试任务各582 tests，0 failures/errors/skipped；`git diff --check` 通过。无客户端操作、未安装玩家实例。该负例覆盖缺失字段，尚未逐项覆盖其它所有错误 NBT 类型/损坏组合。
+
+## 2026-10-27：D15 反馈元数据版本/类型校验统一
+
+- 复核发现仅靠缺字段守卫不足以覆盖旧键混合：新键存在但类型错误时读取默认值会遮蔽可用的旧 `ae2vmGrowthFeedback`/`ae2vmRestoreTargetSeed`；`aecraftrouteDeferredFeedback` 类型错误也会伪装成“旧协议”。
+- 新增共享解析器 `src/main/java/com/aecraftroute/addon/vm/LegacyFeedbackSave.java`：按 NBT 类型选择新键/旧键（有效新键优先，其次有效旧键，坏键且无可回退值时拒绝），缺省旧协议保持兼容；非负种子、deferred 标记必须为按位布尔、true 时必须同时有增长标记与 LONG held。两类 CPU 的 `readFromNBT` 都在修改任何状态前调用它，非法元数据记录原因并取消任务。
+- 新增 `src/test/java/com/aecraftroute/addon/vm/LegacyFeedbackSaveTest.java` 七项：旧键兼容、合法新 false 覆盖旧 true、标记类型错误、缺增长标记/缺 held、坏新键回退有效旧键、无有效回退拒绝、负种子拒绝。定向测试已通过。
+- 新增真实隔离服务端场景 `legacy-feedback[-advanced]-marker-corrupt`（deferred 标记写成字符串）与 `...-heldtype-corrupt`（held 写成字符串）；四个均 PASS，均记录 `Invalid saved ... feedback metadata; cancelling`，CPU/链路取消、requester 收 0、ME 只回真实 held=2。旧缺失-held 与合法 reload 场景另做回归。
+- 补充孤立计数守卫：deferred 标记为 false/缺失但残留 `aecraftrouteDeferredHeld` 时，非零值或类型错误一律拒绝，正常写出的 0 仍兼容旧协议；新增对应回归。
+- 追加一致性守卫：写入端仅在原生 job 存在时写 deferred 标记，因此 marker=true 但缺少 `job` 的存档视为无主信用，解析器直接拒绝；新增「无 job 拒绝 / 有 job 接受」单测。
+- 新增真实隔离服务端`legacy-feedback[-advanced]-oldkeys`：在真实 held=2 时把新键改写成未重命名的`ae2vmGrowthFeedback`/`ae2vmRestoreTargetSeed`，仍须通过`LegacyFeedbackSave`恢复、完成 NBT 往返与 2 个绿宝石交付。首次两例均`FAIL delivered=2/3`，根因是任务没有进入 reload 分支、且请求量落到默认 3；改为进入 reload 分支并请求 2 后：AE2 `PASS 50 ticks`、AdvancedAE `PASS 47 ticks`，日志含`legacy-key save rewritten to the pre-rename keys`、`held=2`与`round-trip`。改写后仍断言新键确已移除，避免夹具假阳性。
+- 该批元数据修复的最终证据：完整离线门禁`test routeFunctionalTest build -x productionBenchmark` BUILD SUCCESSFUL，两组各 **591** tests、0 failures/errors/skipped；`git diff --check`通过。真实服务端回归全部 PASS：`legacy-feedback`、`legacy-feedback-control`、`legacy-feedback-marker-corrupt`、`legacy-feedback-heldtype-corrupt`、两类`advanced`对应变体、`legacy-feedback[-advanced]-seed-rejectonce`、`legacy-feedback[-advanced]-oldkeys`、`legacy-feedback[-advanced]-reload`、`legacy-feedback[-advanced]-corrupt` 与`foreign-advanced`。未操作客户端、未安装玩家实例；未注册第三方 requester 仍走原生计划/自有执行。
+
 ## 2026-10-27：真实ME接口 + AdvancedAE certified真进程重启
 - 新增advanced-restart1/2，复用真实ME接口配置槽+crafting card自行请求链，不手工提交或重建requester-side链接。Advanced场景仅在隔离夹具把旁边原生CPU设PLAYER_ONLY，使机器自动选择Advanced；仍独立用机器链接UUID找到实际busy执行CPU，不看advertised空闲placeholder。
 - 两类restart存取改用实际链接所属CPU，保存时核对原生job+ProductionJob程序+接口恰1个任务。phase1记录预期UUID到仅供核对的sidecar，世界和机器链接由原生区块存档真正保存；新进程必须看到同一机器UUID和certified程序才承认恢复，拒绝把取消后新建的替代任务算恢复。
 - 强化交付验收：原先held+network>=3不足以排除错误改投；现必须真实ME接口held==3且network==0，实际CPU释放。sidecar没有序列化或重建机器requester/链接，与此前legacy测试重建requester方式区分。
 - 最终当前代码四个进程依次运行（均-PneoEcoSelftest）：advanced-restart1 PASS24ticks→新进程advanced-restart2 PASS110ticks，同UUID d23cd6e7-95be-479f-aa64-4601fbe8708e、真实AdvCraftingCPU、接口3/网络0；restart1→新进程restart2也同UUID 82af6e00-3d50-4a21-8456-ebfaa913fdf1、原生CPU、接口3/网络0，PASS。日志与逐阶段fresh receipts `build/audit-<task>-machine.*`。
 - 初次Advanced两阶段仅检查busy/交付，随后补同UUID与程序恢复硬断言后重新四阶段全部运行；最终证据以强化后上述日志为准。完整离线门禁BUILD SUCCESSFUL，测试数仍各579，diff检查通过。未操作客户端、未安装玩家mods；原生scaled/其它配方重启不由该certified增长链替代。
+
+## 2026-10-27：D15 恢复路径的溢出/畸形任务计数加固
+
+- 只读复核（子代理 03e483e0）确认无高危缺陷，但指出 `DeferredFeedbackReservation.potentialInput` 在 `Math.*Exact` 溢出时返回 `Long.MAX_VALUE`，而 `offerRelease` 把任何非零 pendingInput 当作"未来仍可能有消费者"，于是 `Release(0,0)` 永久成立。任务计数来自存档 job NBT，因此被写成 2^62 的损坏存档会让 CPU 永远保留信用且永不完成原生任务（需手动取消）。
+- 新增 `DeferredFeedbackReservation.requireSaneRuns(Map<IPatternDetails,T>,ToLongFunction<T>)`：负计数、加法溢出、或总运行数超过 `MAX_TASK_RUNS=1_000_000_000_000L`（与规划器 `RouteGraphMath.MAX_DEMAND` 同量级）一律抛 `IllegalArgumentException`。两类 CPU 的 `readFromNBT` 在 `ledger.restore(...)` 之前调用它，于是"自身计数永远排不空"的 job 在改变任何 CPU 状态前就被拒绝并按既有 invalid-save 路径取消，不会把信用钉死。
+- 释放路径不再因不可解析的样板槽取消健康任务：新增 `pendingInputOrUnknown(...)` 包装 `potentialInput`，捕获 `RuntimeException` 并返回 `Long.MAX_VALUE`（"未知即继续持有"）。`GrowthCpuMixin.aecraftroute$releaseFeedback` 与 `AdvancedGrowthCpuMixin` 对应方法改用它；理由是无法枚举候选槽的第三方 `IPatternDetails` 并不能证明存档损坏，静默取消会每秒杀死一个正常 job。
+- 未延迟协议的 insert 预判路径同样容错：`task.getKey().getInputs()` 为 null、或槽为 null 时跳过该槽，而不是抛异常穿出我们的 `@WrapMethod` 进入 provider 的 `insert`。这是与 deferred 路径 `GrowthCpuMixin.java:88-89` 既有的 null 容忍保持一致。
+- 解析器把 `job` 检查从无类型 `tag.contains("job")` 收紧为 `tag.contains("job", Tag.TAG_COMPOUND)`：原生 `readFromNBT` 只认 compound，字符串型 job 会让校验通过但原生随后丢弃 job。
+- 补充可观测性：两类 CPU 的 `readFromNBT` TAIL 在 `saved.deferred() && job==null`（原生因 finalOutput 不可读而 `finishJob(false)` 并清空 job）时记录 `Saved deferred feedback discarded: native (AdvancedAE) CPU job did not load (held=...)`。库存本身由原生 `storeItems` 归还 ME，丢的只是诊断/取消路径，现在不再无声。
+- 新增单测：`pendingInputOrUnknown` 对坏槽返回 MAX_VALUE 且 `offerRelease` 仍为 `Release(0,0)`；`requireSaneRuns` 接受 3、拒绝 `Long.MAX_VALUE`、拒绝负数、拒绝超过 `MAX_TASK_RUNS`、恰好等于上限仍可加载、空表通过；`LegacyFeedbackSaveTest` 新增字符串型 `job` 拒绝。
+- 定向 `test --tests 'com.aecraftroute.addon.vm.*'` 通过；完整离线门禁 `test routeFunctionalTest build -x productionBenchmark` BUILD SUCCESSFUL，两个测试任务各 **594** tests、0 failures/errors/skipped（594=591+本次3项新单测），`git diff --check` 通过。真实隔离 NeoForge 服务端回归矩阵全部 PASS（`build/audit-fb8-<task>.log`）：`legacy-feedback`46、`legacy-feedback-control`45、`legacy-feedback-reload`50、`legacy-feedback-corrupt`15、`legacy-feedback-marker-corrupt`15、`legacy-feedback-heldtype-corrupt`15、`legacy-feedback-oldkeys`50、`legacy-feedback-seed-rejectonce`47、`legacy-feedback-advanced`46、`legacy-feedback-advanced-reload`47、`legacy-feedback-advanced-marker-corrupt`15、`legacy-feedback-advanced-heldtype-corrupt`15、`legacy-feedback-advanced-corrupt`15、`legacy-feedback-advanced-oldkeys`47、`legacy-feedback-advanced-seed-rejectonce`47、`foreign-advanced`16。这些真实进程回执证明排队/释放路径在硬化后仍能正常派发并交付，也证明合法 oldkeys/reload 存档未被新守卫误杀。
+- 保留判断（记录为有意行为）：写入端在空闲时也写出 `aecraftrouteDeferredHeld=0`，因此严格孤立守卫会拒绝"marker 位丢失 + held!=0"的存档；这是 fail-closed 选择，宁可取消退款也不恢复来源不明的信用。
+## 2026-10-27：画布请求数量在服务端按规划上限拒绝
+
+- 缺陷（只读审计发现）：`src/main/java/com/aecraftroute/addon/route/RouteNetwork.java` 的 `planAsync` 只检查 `amount<=0`（`目标数量必须大于零`），直接采信 argument JSON 的 `getAsLong()`；而客户端自己的数量编辑已经在 `RouteQuantityField`/`RouteGraphMath.clampDemand` 里夹到 `[1, MAX_DEMAND]`。改过的客户端可以送任意正 `long`，把失败推到画布规划器深层的 `Math.multiplyExact`/`Math.addExact`，只能以通用 `规划失败：…` 或 `数量超出整数范围` 呈现。这不构成绕过（未证明的计划不会提交），但把一处确定的上限校验变成了不可预期的异常类型。
+- 修复：`src/main/java/com/aecraftroute/addon/route/RouteRequestRules.java` 新增 `public static long requirePlanAmount(long amount)`，`amount<=0` 抛 `目标数量必须大于零`，`amount>RouteGraphMath.MAX_DEMAND`（=1_000_000_000_000）抛 `目标数量超过上限 …；未规划`；`planAsync` 改用它替换原来的内联检查。上限复用 `MAX_DEMAND` 而不是新造常量，因为它存在的理由正是让 inputNeed 远离溢出。
+- 行为边界：只拒绝、不静默夹取。夹取会把玩家的超大需求悄悄改成 1e12 再照做，与画布上所示数量不一致；拒绝则与客户端 `parseDemand`（只接受 `[0-9]{1,15}` 再夹取）语义一致。`apply` 路径本来就要求请求目标/数量与合成确认页一致（`RouteNetwork.java:196`），因此正常 UI 流程不会碰到该上限。
+- 单测：`src/test/java/com/aecraftroute/addon/route/RouteRequestRulesTest.java` 新增 `requestAmountsOutsideThePlanRangeAreRefusedBeforePlanning`：1 与 `MAX_DEMAND` 原样返回，0/-1/`MAX_DEMAND+1`/`Long.MAX_VALUE` 一律 `IllegalArgumentException`，且超大值消息含 `目标数量超过上限`。
+- 证据：完整离线门禁 `test routeFunctionalTest build -x productionBenchmark` BUILD SUCCESSFUL，两个测试任务各 **595** tests、0 failures/errors/skipped（595=594+本次1项）；日志 `build/audit-gate-amount.log`。真实隔离服务端画布场景回归 PASS：`vanilla-canvas`17 ticks、`vanilla-canvas-advanced`20、`paths`107（`build/audit-amount-<task>.log`），证明合法请求仍能编码、规划并交付路径分支，新守卫只拦越界值。未操作客户端、未安装玩家实例。
+
+## 2026-10-27：画布报文严格解析
+
+- 缺陷（只读审计）：`src/main/java/com/aecraftroute/addon/route/RouteNetwork.java` 的 `planAsync` 原用 `GSON.fromJson(request.argument(),JsonObject.class)` 后直接 `e.get("k").getAsString()`。改过的客户端送来非字符串的 `k/c/n/p`、非对象的分支项或非数字 `amount` 时，Gson 抛出的异常被外层 `catch(Exception)` 转成泛化的「操作失败：…」，而不是明确的请求拒绝。不构成绕过（只有 `if(apply && view.proven())` 才提交），是输入契约与错误分类问题。
+- 修复：`src/main/java/com/aecraftroute/addon/route/RouteCanvasPayload.java` 新增 `record Decoded(long amount,List<RouteApply.Node> nodes)` 与 `static Decoded decode(String)`。空/空白 → 「画布数据为空」；非 JSON → 「画布数据不是有效 JSON」；非对象 → 「画布数据不是 JSON 对象」；`amount` 非 JSON 数字 → 「画布数量不是数字」；`nodes` 非数组 → 「画布分支不是 JSON 列表」；分支项非对象 → 「画布分支第 N 项不是 JSON 对象」；`k/c/n/p` 存在但非字符串 → 「画布分支第 N 项的 k 不是文本」。缺失字段保持 null 交给 `RouteApply.prepare` 拒绝，未知键忽略，不夹取也不放宽任何约束。
+- 接入：`planAsync` 改为 `var decoded=RouteCanvasPayload.decode(request.argument())`，随后仍用 `RouteRequestRules.requirePlanAmount(amount)` 校验数量。
+- 单测：`src/test/java/com/aecraftroute/addon/route/RouteCanvasPayloadTest.java` 新增三项——正常报文解析 + 128 节点无名称形式往返；7 种畸形消息逐条断言（含 `k` 为数字）；缺失字段保持 null 且 `prepare` 仍报问题。
+- 证据：完整离线门禁 BUILD SUCCESSFUL，两组各 **598** tests、0 failures/errors/skipped；真实隔离服务端 `vanilla-canvas` 22 ticks、`vanilla-canvas-advanced` 22、`paths` 147 全部 PASS（`build/audit-decode-<task>.log`）。未操作客户端、未安装玩家实例。
+
+## 2026-10-27：certified 派发按原生模糊模板取料
+
+- 缺陷（只读审计 M-2，反汇编核实）：`appeng.crafting.execution.CraftingCpuHelper.extractPatternInputs` 对每个槽调用 `getValidItemTemplates(inv,input,level)`——把 `input.getPossibleInputs()` 的每个 `GenericStack` 交给 `inv.findFuzzyTemplates(what)` 展开，再用 `input.isValid(key,level)` 过滤——然后逐候选 `extractTemplates` 先 SIMULATE 再 MODULATE。原 `ProductionJob.extract` 只按计划里编码的精确 key 取料，因此当样板槽可接受等价但非同一 key 的库存（`canSubstitute`、仅组件不同的模糊族）时，certified 任务会永久等料，只剩 30 秒的 `aecraftroute$watchStall` 警告。
+- 修复：`src/main/java/com/aecraftroute/addon/planner/ProductionJob.java` 的 `extract` 改为逐 portion 调新的 `takePortion(...)`：先用 `fill(...)` 取精确 key（保证计划自身的 key 记账精确），不足部分再遍历 `inventory.findFuzzyTemplates(template.what())`，跳过 null、与精确 key 相同者以及 `input.isValid` 不接受者，逐候选 `fill`。`fill(...)` 用 `Math.multiplyExact` 换算整份数，SIMULATE 求可倍数、MODULATE 扣料，`slot.add(candidate,got)`，并针对**实际扣下的候选 key** 记 `input.getRemainingKey(candidate)` 的容器回收。整个 `extract` 的扣料循环仍在既有 `try/catch(RuntimeException|Error)` 内，任何异常都会 `reinjectPatternInputs` 并取消任务而非把已扣物料丢在 AE2 里。
+- 行为边界：仍只扣计划允许的槽与倍数；不足时整体回滚并返回 null（视作等料而非存档损坏），不回退到「任意等价物品都算数」。模糊族仅用于实际存在的库存，不改变证明侧的材料需求。
+- 单测：`src/test/java/com/aecraftroute/addon/planner/ProductionExecutionTest.java` 新增 `fuzzyInventory(...)` 夹具与三项——只有等价库存时成功扣该 key 并记在它名下、精确 key 与等价库存同时在时优先扣精确 key、两槽只够一槽时返回 null 且库存全数回滚且任务未被标记损坏。
+- 证据：完整离线门禁 `test routeFunctionalTest build -x productionBenchmark` BUILD SUCCESSFUL，两组各 **601** tests、0 failures/errors/skipped（601=598+本次3项）；`build/audit-fuzzy*.log`。真实隔离服务端回归 PASS：`growth` 118 ticks、`paths` 106、`vanilla-canvas` 18（`build/audit-fuzzy-<task>.log`）。未操作客户端、未安装玩家实例；第三方 requester 仍走原生规划与自有执行。
+
+## 2026-10-27：certified 任务身份恢复为样板自带相等语义（不放宽为结构比较）
+
+- 触发点：审计中曾把 `ProductionJob.validateRemainingTasks` 与 `allows` 的样板身份从 `IPatternDetails.equals` 放宽成结构比较（同类名 + 相同 outputs + 每槽 multiplier 与 possibleInputs 逐一相同）。该放宽已回退：容器返还、替换规则与供应器行为都不在可见字段里，结构相同不等于派发相同，放宽属于错误放行。
+- 现状（`src/main/java/com/aecraftroute/addon/planner/ProductionJob.java`）：`sameTasks` 只做 `certified.equals(actual)`，`samePattern` 只做 `Objects.equals`；不一致时置 `invalid` 并打 `Native tasks disagree with production cursor ... cancel and resubmit. No inventory mutation.`。
+- 结论：M-1（第三方 `IPatternDetails` 未实现 `equals`，重载后对象身份必然不同）按 fail-closed 接受，不修。理由：这类样板本来也无法派发（`allows` 会拒绝，供应器只会重试），而重载时会先取消任务——库存在取消路径上不动、材料回到 ME，只需重新提交；换成结构比较则是用「可能的错误放行」换「少一次取消」，得不偿失。
+- 诊断改进：不一致时的错误日志带 `certified=N actual=M` 以及最多 4 条 `[want 类名x数量]` / `[have 类名x数量]`，能直接看出是哪一侧样板不同，而不是只留一句笼统的取消提示。
+- 证据：`gradle --offline test --tests com.aecraftroute.addon.planner.*` BUILD SUCCESSFUL；完整离线门禁 `test routeFunctionalTest build -x productionBenchmark` BUILD SUCCESSFUL（`build/audit-gate-identity-safe.log`）；真实隔离 NeoForge 服务端 `reload` 取得 fresh 回执 `RESULT=PASS task=reload ticks=168`（`build/audit-identity-reload.log`）。
+- 未新增单测：既有 `ProductionPersistenceTest.completedCursorCannotHideUndispatchedNativeTasks` 与 `TerminalDeliveryTest.noDeliveryBeforeEveryCertifiedStepHasDispatchedEvenWithPlentyOfStock` 已覆盖「原生任务与本模组游标不一致即取消」这条路径；本次改动只是把判定恢复成样板自身语义。
+### 2026-10-27 补充：当前树的重启与 scaled 变体真实服务端回归
+
+- 顺序要求（`build.gradle:160-166`）：除 `restart2`/`advanced-restart2`/`legacy-feedback-*-restart2` 外，每个自检任务都会重建测试世界；`restart2` 是 `restart1` 的后半段，必须紧接其后运行。单独跑 `restart2` 会以 `ME interface job ran on wrong CPU family: net.pedroksl.advanced_ae.common.cluster.AdvCraftingCPU` 正确 FAIL——那是世界状态缺失，不是产品缺陷。另注意白名单里没有 `advanced-reload` 这个任务名（真实存在的是 `legacy-feedback-advanced-reload` 与 `advanced-restart1/2`），拼错会在 Minecraft 启动前被 `Unknown selftest task` 拒绝。
+- fresh 回执（本次在含「certified 模糊取料 + 样板自带相等语义」的当前树上取得，日志 `build/audit-r15b-*.log`、`build/audit-r15c-*.log`）：`advanced-restart1` PASS 24 ticks → `advanced-restart2` PASS 110 ticks；`restart1` PASS 24 ticks → `restart2` PASS 110 ticks；`scaled-processing-execution` PASS 55 ticks、`scaled-processing-plain-execution` PASS 55 ticks、`scaled-advanced` PASS 19 ticks（后三者带 `-PextendedAePlusSelftest` 加载安装版 ExtendedAE Plus）。
+- 覆盖含义：跨进程重启后 certified 程序仍能按原生任务表校验并继续交付（两种 CPU 家族各一对），以及 ExtendedAE Plus 的普通/高级 scaled 包装器在真实执行链上交付正常。仍不覆盖 A1 真实 ATM10 最大画布、A2 其余尺寸/并发组合、A5 整包容量与全部客户端视觉交互。
+- 回归锁（2026-10-27）：新增 `src/test/java/com/aecraftroute/addon/planner/PatternIdentityTest.java`（4 项）把上面这条判定钉死：同实例、值相等的两份解码视为同一张样板；**可见输出与槽位候选完全相同、只有容器返还不同**的两张样板必须判为不同（若哪天又把身份放宽成结构比较，这条会先失败）；同类的第三方样板若无 `equals` 则一律 fail-closed。
+- 计数：本次新增 4 项单测，完整离线门禁 `test routeFunctionalTest build -x productionBenchmark` 两组各 **605** tests、0 failures/errors/skipped（605=601+4），日志 `build/audit-gate-identity-test.log`。
+
+### 2026-10-27：M-3 增长环启发式落下可诊断痕迹
+
+- 问题（审计 M-3）：`src/main/java/com/aecraftroute/addon/vm/TwoNodeGrowthPlanner.java` 的 `containsRing` 只是一个布尔，它直接决定是否建立延迟反馈账本、是否重排派发顺序。多环/歧义（`find` 遇到第二个候选环返回 null）、回收线带副产物、回收器产量不匹配、计数溢出等情形会静默退回原生 HashMap 迭代顺序，日志里没有任何「本该识别却没识别」的线索，饿死现场只能靠猜。
+- 改动（行为不变，仅可观测性）：`find` 遇到第二个候选环时 `note("ambiguous two-node rings; leaving dispatch order to the native engine")`；`containsRing` 的 `ArithmeticException` 分支 `note("pattern quantities overflow while detecting a feedback ring")`；`note` 只在 `CraftRouteConfig.isDebugLogging()` 时以 info 打 `[AE-Craftroute] Feedback ring not modelled: …`。判定结果、重排行为、延迟反馈账本的建立条件都没有改。
+- 单测：`src/test/java/com/aecraftroute/addon/vm/TwoNodeGrowthPlannerTest.java` 新增 `ambiguousRingsAreDeclinedInsteadOfGuessed`——同一产线的两个回收器各自单独成环都为真，但三者同时在场时必须判 false，且 `prioritizeFeedback` 返回的键顺序保持不变（策略仍是「不猜」，只是现在能被看到）。注：该方法在无环时仍返回新 map（与溢出分支返回原 map 不同），锁的是顺序而不是实例。
+- 证据：`gradle --offline test --tests com.aecraftroute.addon.vm.*` BUILD SUCCESSFUL（`build/audit-m3b.log`）；完整离线门禁 `test routeFunctionalTest build -x productionBenchmark` BUILD SUCCESSFUL，两组各 **606** tests、0 failures/errors/skipped（606=605+1，`build/audit-gate-m3.log`）；真实隔离服务端回归 PASS：`growth` 117 ticks、`legacy-feedback` 46、`advanced` 117（`build/audit-r16-<task>.log`）。
+- 仍未覆盖：真正的多环建模（把 N 环都排对顺序）仍不在本模组范围内，歧义时依旧交给原生引擎；A1/A2/A5 与客户端交互验收同样仍开放。
+
+### 2026-10-27 补充：606 门禁树的收尾真实服务端矩阵
+
+- 在含「certified 模糊取料 + 样板自带相等语义 + 增长环可诊断」的最终树上补跑（日志 `build/audit-r17-<task>.log`）：`vanilla-canvas` PASS 18 ticks、`vanilla-canvas-advanced` PASS 19、`paths` PASS 144、`legacy-feedback-advanced` PASS 46、`legacy-feedback-reload` PASS 50、`planning-load` PASS 30、`cancel` PASS 69、`legacy-feedback-corrupt` PASS 15、`legacy-feedback-oldkeys` PASS 50。
+- 负对照：`gate-failure` 按设计以 `RESULT=FAIL task=gate-failure ticks=0 failures=[intentional negative control for the Gradle selftest gate]` 收场并让 Gradle 退出码为 1 —— 这条证明验收门禁只认 fresh 的精确 `PASS task=<task>` 回执，不会把「跑了但失败」当成通过。不要把它当失败信号。
+- 组合起来本轮已覆盖：画布（普通/高级/长路径）、D15 反馈元数据（合法/损坏/旧键/重载）、规划队列背压（planning-load）、取消、以及两种 CPU 家族的重启对与三个 scaled 执行变体（见上一节）。仍未覆盖：A1 真实 ATM10 最大画布、A2 其余尺寸与并发组合、A5 整包容量、以及全部客户端视觉/交互验收（后者需用户授权）。
+
+### 2026-10-27 L 系列文档化 + A1 真实规模静态采样（本轮批次）
+
+- **L1–L14 管线文档**：新增 `docs/canvas-pipeline-l-series.md`（219 行，仅新建该文件）。14 条全部按当前未提交树逐行实读记录，每条含现行 file:line、职责、校验/守卫与 progress/coverage 证据指针；L14 标注为不存在并贴 `RouteView.java:51-52` Reply 全签名为证。历史 `canvas-planner-executor-audit-local59.md` 的行号全部过时（如 L3 60-110→51-173、L10 127-186→120-180、L11 21-92→22-139），文末附行号漂移表。L1/L2 客户端部分全部标未验收/需授权。抽查复核：L14 与 D21（`RouteNetwork.java:124` 条件 put）两处行号与源码一致。
+- **A1 静态采样（只读，不改文件、不跑 Gradle/客户端）**：全实例扫描 mods 557/557 jar + kubejs + 两存档 datapack，内存解析零落盘、两轮交叉核对：**85,703** 个配方 JSON（jar 85,574 + kubejs 129；55 个不可读 jar=0.06%；存档 datapack 0 配方），约 53.5k 不同产物。扇出：≥2 配方 9,442、≥10 324、≥16 126、≥32 49；最大 `productivebees:spawn_egg_configurable_bee`=210。配料槽最多 84（chipped:workbench）；144 个配方有多选槽（最大 24）；3,904 个配方含 tag 配料（运行期才展开）。依赖闭包：250 个终局候选中 **62 个闭包 >128**（`extendedae_plus:infinity_core`=1,525、`advanced_ae:quantum_multi_threader`=1,404、`ae2:engineering_processor`=1,362）；最宽配方 BFS 在深度 8–12 跨过 128 节点，均远低于 `MAX_PATH_DEPTH=24`。按 `RouteCanvasPayload.encode` 实际形状模拟真实 128 节点前缀的报文：**17,135–21,562 字符，全部 ≤24,000** ⇒ 实测中 `MAX_NODES=128` 先于 `MAX_CHARACTERS=24000` 成为约束（128 节点无标签时余量约 6.4k，标签均长约 50 字符内不越界）。局限：14.7% 配方无可静态解析输入、KubeJS 循环与 tag 展开使真实规模 ≥ 静态测量；BFS 是代理而非规划器真实展开序；未做任何运行期观测。
+- **建议的下一批 A1 自测**（尚未实施）：新自测任务 `canvas-scale`——需先加进 `build.gradle:133` 白名单（回执逻辑无需改，`SelftestHarness.java:2041` 写 `PASS task=<name>`）；harness 生成 9 宽×4 层=128 节点真实形状 datapack，跑 encode→RouteApply.apply→planAsync→真实 CPU，要求 `locked=128`、`proven`、`chars≤24000`，并加 129 节点必须原样拒绝「强制画布有 129 个分支，最多 128」的负例。风险：样板提供器槽位容量、128 节点下 `Limits(6000,500_000_000L)` 余量未知、深树 tick 预算。
+- **本轮门禁**：`test routeFunctionalTest build -x productionBenchmark` BUILD SUCCESSFUL，两组各 **606** tests、0 failures/errors（`build/audit-gate-lseries.log`）。真实服务端自检 `vanilla-canvas` PASS ticks=17、delivered=1（`build/audit-selftest-lseries.log`）。
+- **环境教训**：本会话沙箱下 `gradlew` 不可用（wrapper jar 缺失 → ClassNotFoundException: org.gradle.wrapper.GradleWrapperMain），直接调缓存 gradle 8.8 会因沙箱拦 `~/.gradle/native/native-platform.dll` 报 `Could not initialize native services`；可行命令为 danger-full-access 下 `gradle -Porg.gradle.java.installations.paths=C:/Users/xun/.gradle/jdks/jdk21/jdk-21.0.12.1+1 test routeFunctionalTest build -x productionBenchmark`（JDK21 在 `~/.gradle/jdks/jdk21/jdk-21.0.12.1+1`，foojay 下载不可用）。
+- **仍未覆盖**：A1 的运行期真实画布分支数与 >128 的真实客户端行为、A2 其余尺寸/并发组合、A5 整包容量、全部客户端视觉交互验收（需用户授权）。
+
+### 2026-10-27 补充：606 门禁树的整包服务端自检横扫（第一批）
+
+- 目的：把「这一版最终树」在各条已在白名单里的场景上过一遍，而不是只信上一次改动时的抽样。日志 `build/audit-r18-<task>.log`，全部 fresh `RESULT=PASS`：
+- 兼容/第三方边界：`foreign` 16 ticks、`foreign-advanced-plus` 66（带 `-PextendedAePlusSelftest`）、`fallback` 23、`fallback-small` 19、`fallback-busy` 29 —— 未注册 requester 仍走原生链、只在已认证计划上做 CPU 回退。
+- 交付与竞态：`partial` 118、`overestimate` 118、`advanced-overestimate` 119、`stock-race` 122、`advanced-stock-race` 123、`rejectonce` 118 —— 部分交付、产量高估、库存抢占与「拒一次再接受」都按真实机器行为收尾。
+- scaled 家族补齐：`scaled-native-plan` 5、`scaled-strict-roundtrip` 3、`scaled-molecular-execution` 13（均带 `-PextendedAePlusSelftest`）—— 连同此前 `scaled-advanced` 19、`scaled-processing-execution` 55、`scaled-processing-plain-execution` 55，白名单里七个 scaled 场景在最终树全绿。
+- 说明：这些是行为回归证据，不等于 A1（真实 ATM10 最大画布）、A2（其余尺寸/并发组合）或 A5（整包容量）已验收；客户端视觉交互仍未触碰。

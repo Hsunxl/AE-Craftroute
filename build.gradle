@@ -141,7 +141,10 @@ def expectedSelftestResult = 'PASS task=' + selectedSelftestTask
     'legacy-feedback-restart1', 'legacy-feedback-restart2',
     'legacy-feedback-advanced-restart1', 'legacy-feedback-advanced-restart2',
     'legacy-feedback-seed-rejectonce', 'legacy-feedback-advanced-seed-rejectonce',
-    'legacy-feedback-corrupt', 'legacy-feedback-advanced-corrupt', 'gate-failure']
+    'legacy-feedback-corrupt', 'legacy-feedback-advanced-corrupt',
+    'legacy-feedback-oldkeys', 'legacy-feedback-advanced-oldkeys',
+    'legacy-feedback-marker-corrupt', 'legacy-feedback-advanced-marker-corrupt',
+    'legacy-feedback-heldtype-corrupt', 'legacy-feedback-advanced-heldtype-corrupt', 'gate-failure']
 tasks.named('runSelftestServer') {
     doFirst {
         // Reject typos before starting Minecraft (whose harness resets its test world).

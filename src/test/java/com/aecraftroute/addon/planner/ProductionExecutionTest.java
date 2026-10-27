@@ -276,6 +276,72 @@ class ProductionExecutionTest {
         assertEquals(0, cpu.stock(seed));
     }
 
+    /** Fuzzy inventory: `findFuzzyTemplates` reports the whole accepted family, the way
+     * AE2's {@code KeyCounter.findFuzzy} does for a stack with components. */
+    static ListCraftingInventory fuzzyInventory(Map<AEKey, List<AEKey>> families) {
+        return new ListCraftingInventory(key -> { }) {
+            @Override public Iterable<AEKey> findFuzzyTemplates(AEKey key) {
+                return families.getOrDefault(key, List.of(key));
+            }
+        };
+    }
+
+    /** A pattern whose slot accepts several variants may run on an equivalent stack the CPU
+     * actually holds: native extraction expands fuzzy templates and keeps the ones the slot
+     * accepts, so insisting on the exact planned key would stall a legal firing forever. */
+    @Test
+    void equivalentStackSatisfiesThePlannedSlotLikeNativeExtraction() {
+        var alt = BenchAEKey.of("exec_dust_alt");
+        var pattern = new BenchPatternDetails(seed, 1, List.of(BenchPatternDetails.InputSpec.fuzzy(dust, 1, alt)));
+        var job = new ProductionJob(plan(seed, 1, Map.of(dust, 1L),
+                List.of(block(1, step(variant(pattern, new GenericStack(dust, 1)), 1)))));
+        var inventory = fuzzyInventory(Map.of(dust, List.of(dust, alt)));
+        inventory.insert(alt, 1, Actionable.MODULATE);
+
+        var outputs = new KeyCounter();
+        var inputs = job.extract(pattern, inventory, null, outputs, new KeyCounter());
+
+        assertNotNull(inputs, "an accepted equivalent stack must satisfy the planned slot");
+        assertEquals(1, inputs[0].get(alt), "the debit is recorded against the stack really taken");
+        assertEquals(0, inventory.list.get(alt), "the equivalent stack is spent");
+        assertEquals(1, outputs.get(seed), "the pattern still produces its own output");
+        assertFalse(job.invalid());
+    }
+
+    /** The exact planned key wins when it is available, so the plan's own key accounting
+     * stays exact and the substitution only bridges a real shortage. */
+    @Test
+    void exactPlannedKeyIsPreferredOverAnEquivalentStack() {
+        var alt = BenchAEKey.of("exec_dust_alt2");
+        var pattern = new BenchPatternDetails(seed, 1, List.of(BenchPatternDetails.InputSpec.fuzzy(dust, 1, alt)));
+        var job = new ProductionJob(plan(seed, 1, Map.of(dust, 1L),
+                List.of(block(1, step(variant(pattern, new GenericStack(dust, 1)), 1)))));
+        var inventory = fuzzyInventory(Map.of(dust, List.of(dust, alt)));
+        inventory.insert(dust, 1, Actionable.MODULATE);
+        inventory.insert(alt, 1, Actionable.MODULATE);
+
+        assertNotNull(job.extract(pattern, inventory, null, new KeyCounter(), new KeyCounter()));
+        assertEquals(0, inventory.list.get(dust), "the planned key is taken first");
+        assertEquals(1, inventory.list.get(alt), "the equivalent stack is left untouched");
+    }
+
+    /** When neither the planned key nor any accepted equivalent is stocked, the dispatch must
+     * take nothing at all - a partial slot would be an uncertified firing. */
+    @Test
+    void unsatisfiedSlotTakesNothingEvenWhenOtherStacksExist() {
+        var alt = BenchAEKey.of("exec_dust_alt3");
+        var pattern = new BenchPatternDetails(seed, 2,
+                List.of(BenchPatternDetails.InputSpec.fuzzy(dust, 1, alt), BenchPatternDetails.InputSpec.fuzzy(dust, 1, alt)));
+        var job = new ProductionJob(plan(seed, 2, Map.of(dust, 2L),
+                List.of(block(1, step(variant(pattern, new GenericStack(dust, 1), new GenericStack(dust, 1)), 1)))));
+        var inventory = fuzzyInventory(Map.of(dust, List.of(dust, alt)));
+        inventory.insert(dust, 1, Actionable.MODULATE);   // enough for the first slot, not the second
+
+        assertNull(job.extract(pattern, inventory, null, new KeyCounter(), new KeyCounter()));
+        assertEquals(1, inventory.list.get(dust), "a half-filled pattern is rolled back completely");
+        assertFalse(job.invalid(), "running out of stock is a wait, not a corrupt job");
+    }
+
     /** A refused dispatch must not consume anything: the provider never saw the pattern,
      * so the cache has to be exactly as it was. */
     @Test

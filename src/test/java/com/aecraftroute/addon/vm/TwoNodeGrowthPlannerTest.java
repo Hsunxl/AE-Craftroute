@@ -48,4 +48,22 @@ class TwoNodeGrowthPlannerTest {
         assertFalse(TwoNodeGrowthPlanner.containsRing(tasks.keySet()));
         assertSame(tasks,TwoNodeGrowthPlanner.prioritizeFeedback(tasks));
     }
+
+    /** Two recyclers for the same production line are ambiguous: the planner declines
+     * rather than guessing an order, and says so at debug level instead of silently
+     * falling back to the native HashMap order. */
+    @Test void ambiguousRingsAreDeclinedInsteadOfGuessed() {
+        var p=production();
+        var dustRecycler=recycle();
+        var fuelRecycler=new BenchPatternDetails(fuel,1,List.of(of(crystal,1)));
+        assertTrue(TwoNodeGrowthPlanner.containsRing(List.of(p,dustRecycler)));
+        assertTrue(TwoNodeGrowthPlanner.containsRing(List.of(p,fuelRecycler)));
+        assertFalse(TwoNodeGrowthPlanner.containsRing(List.of(p,dustRecycler,fuelRecycler)));
+        var tasks=new LinkedHashMap<IPatternDetails,Long>();
+        tasks.put(p,2L);tasks.put(dustRecycler,1L);tasks.put(fuelRecycler,1L);
+        // No ring is modelled, so the dispatch order must come back unchanged (the method
+        // still returns a fresh map, unlike the overflow path which returns the input).
+        assertEquals(List.copyOf(tasks.keySet()),
+                List.copyOf(TwoNodeGrowthPlanner.prioritizeFeedback(tasks).keySet()));
+    }
 }

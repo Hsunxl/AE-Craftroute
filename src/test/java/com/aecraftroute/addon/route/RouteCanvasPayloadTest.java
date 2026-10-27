@@ -51,4 +51,38 @@ class RouteCanvasPayloadTest {
         var error=assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.encode(1,large));
         assertTrue(error.getMessage().contains("未应用任何分支"));
     }
+    @Test void wireFormIsParsedWithExplicitTypeChecksInsteadOfRawGsonFailures() {
+        var decoded=RouteCanvasPayload.decode("{\"amount\":7,\"nodes\":[{\"k\":\"{id:\\\"minecraft:iron_ingot\\\"}\",\"c\":\"abc\",\"p\":\"root\"}]}");
+        assertEquals(7,decoded.amount());
+        assertEquals(1,decoded.nodes().size());
+        assertEquals("root",decoded.nodes().getFirst().path());
+        assertNull(decoded.nodes().getFirst().label());
+        // Round-trip of what encode actually wrote, including the compact (no label) form.
+        var round=RouteCanvasPayload.decode(RouteCanvasPayload.encode(100_000,nodes("名".repeat(200))));
+        assertEquals(100_000,round.amount());
+        assertEquals(RouteCanvasPayload.MAX_NODES,round.nodes().size());
+    }
+    @Test void malformedWireFormIsRefusedByItsOwnMessageNotByTheGenericCatchAll() {
+        assertEquals("画布数据为空",assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.decode(" ")).getMessage());
+        assertEquals("画布数据不是有效 JSON",assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.decode("{")).getMessage());
+        assertEquals("画布数据不是 JSON 对象",assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.decode("[]")).getMessage());
+        assertEquals("画布数量不是数字",assertThrows(IllegalArgumentException.class,
+                ()->RouteCanvasPayload.decode("{\"amount\":\"999999999999999\"}")).getMessage());
+        assertEquals("画布分支不是 JSON 列表",assertThrows(IllegalArgumentException.class,
+                ()->RouteCanvasPayload.decode("{\"nodes\":{}}")).getMessage());
+        var notObject=assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.decode("{\"nodes\":[1]}"));
+        assertTrue(notObject.getMessage().contains("第 1 项"));
+        // A non-string material text used to throw from Gson deep inside the handler.
+        var notText=assertThrows(IllegalArgumentException.class,
+                ()->RouteCanvasPayload.decode("{\"nodes\":[{\"c\":\"id\",\"p\":\"root\",\"k\":123}]}"));
+        assertTrue(notText.getMessage().contains("k 不是文本"),notText.getMessage());
+    }
+    @Test void absentFieldsStayNullSoPrepareStillRejectsThem() {
+        var decoded=RouteCanvasPayload.decode("{}");
+        assertEquals(1,decoded.amount());
+        assertTrue(decoded.nodes().isEmpty());
+        var problem=RouteApply.prepare(null,new RoutePolicy<appeng.api.stacks.AEKey>(Map.of()),null,null,1,
+                List.of(new RouteApply.Node(null,null,null,null)));
+        assertFalse(problem.problems().isEmpty());
+    }
 }

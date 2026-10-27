@@ -259,6 +259,8 @@ public final class SelftestHarness {
         private ICraftingRequester foreignRequester;
         private final boolean stockRace;
         private final boolean legacyFeedback;
+        private final boolean legacyMarkerCorrupt;
+        private final boolean legacyOldKeys;
         private final boolean legacyRestart1,legacyRestart2;
         private Object stockRaceJob;
         private boolean stockRaceDrained;
@@ -297,6 +299,8 @@ public final class SelftestHarness {
                     || "foreign-advanced-plus".equals(this.task) || isScaledProcessingExecution(this.task) || "scaled-molecular-execution".equals(this.task)
                     || this.task.startsWith("legacy-feedback-advanced") || this.task.startsWith("advanced-restart");
             this.legacyFeedback=this.task.startsWith("legacy-feedback");
+            this.legacyMarkerCorrupt=this.task.endsWith("marker-corrupt");
+            this.legacyOldKeys=this.task.endsWith("oldkeys");
             this.legacyRestart1=legacyFeedback && task.endsWith("restart1");
             this.legacyRestart2=legacyFeedback && task.endsWith("restart2");
             this.restart1 = "restart1".equals(this.task) || "advanced-restart1".equals(this.task);
@@ -973,7 +977,8 @@ public final class SelftestHarness {
                         "legacy-feedback-reload", "legacy-feedback-advanced-reload",
                         "legacy-feedback-restart1", "legacy-feedback-advanced-restart1",
                         "legacy-feedback-seed-rejectonce", "legacy-feedback-advanced-seed-rejectonce",
-                        "legacy-feedback-corrupt", "legacy-feedback-advanced-corrupt" -> 2;
+                        "legacy-feedback-corrupt", "legacy-feedback-advanced-corrupt",
+                        "legacy-feedback-oldkeys", "legacy-feedback-advanced-oldkeys" -> 2;
                 case "reload" -> 4;
                 case "paths" -> 1;
                 case "vanilla" -> 1;
@@ -1460,7 +1465,7 @@ public final class SelftestHarness {
 
         private void run() {
             if(paths && pathObserver!=null) pathObserver.sample();
-            if(legacyFeedback && (task.endsWith("reload") || task.endsWith("corrupt") || legacyRestart1) && !reloaded) {
+            if(legacyFeedback && (task.endsWith("reload") || task.endsWith("corrupt") || legacyOldKeys || legacyRestart1) && !reloaded) {
                 reloadLegacyFeedbackIfBuffered();
                 if(finished)return;
             }
@@ -1545,8 +1550,19 @@ public final class SelftestHarness {
                 }
                 if(!tag.getBoolean("aecraftrouteDeferredFeedback") || !tag.contains("job"))
                     throw new IllegalStateException("Buffered feedback has no saved protocol/job marker");
+                if(legacyOldKeys) {
+                    long seed=tag.getLong("aecraftrouteRestoreTargetSeed");
+                    tag.remove("aecraftrouteGrowthFeedback");tag.remove("aecraftrouteRestoreTargetSeed");
+                    tag.putBoolean("ae2vmGrowthFeedback",true);tag.putLong("ae2vmRestoreTargetSeed",seed);
+                    LOG.info("[SELFTEST] legacy-key save rewritten to the pre-rename keys: {}",tag.getAllKeys());
+                }
+                if(legacyOldKeys && (tag.contains("aecraftrouteGrowthFeedback") || tag.contains("aecraftrouteRestoreTargetSeed"))) {
+                    throw new IllegalStateException("Legacy-key fixture did not actually remove the renamed feedback keys");
+                }
                 if(task.endsWith("corrupt")) {
-                    tag.putLong("aecraftrouteDeferredHeld",Math.addExact(held,1));
+                    if(legacyMarkerCorrupt)tag.putString("aecraftrouteDeferredFeedback","bad");
+                    else if(task.equals("legacy-feedback-corrupt") || task.equals("legacy-feedback-advanced-corrupt"))tag.remove("aecraftrouteDeferredHeld");
+                    else tag.putString("aecraftrouteDeferredHeld","bad");
                     read.invoke(executingCpu,tag,level.registryAccess());
                     long returned=inventory().extract(AEItemKey.of(Items.EMERALD),Long.MAX_VALUE,Actionable.SIMULATE,IActionSource.empty());
                     if(executingCpu.isBusy() || requester.delivered!=0 || returned!=held || !link.isCanceled())

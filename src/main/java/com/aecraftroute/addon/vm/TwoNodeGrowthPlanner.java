@@ -68,7 +68,10 @@ public final class TwoNodeGrowthPlanner {
             if (back == null || !back.output.equals(e.getKey()) || back.amount != 1 || back.inputs.size() != 1
                     || back.inputs.getOrDefault(production.output, 0L) != 1
                     || production.amount <= e.getValue()) continue;
-            if (found != null) return null; // ambiguous rings: leave to the original engine
+            if (found != null) {
+                note("ambiguous two-node rings; leaving dispatch order to the native engine");
+                return null; // ambiguous rings: leave to the original engine
+            }
             found = new Ring(production, back, e.getKey(), e.getValue());
         }
         return found;
@@ -87,6 +90,7 @@ public final class TwoNodeGrowthPlanner {
             }
         } catch (ArithmeticException ignored) {
             // An overflowing pattern cannot be a ring we can honour; treat as absent.
+            note("pattern quantities overflow while detecting a feedback ring");
         }
         return false;
     }
@@ -108,5 +112,13 @@ public final class TwoNodeGrowthPlanner {
         }
         tasks.forEach(ordered::put);
         return ordered;
+    }
+
+    /** Debug-only breadcrumb: a feedback shape we declined to model used to vanish without
+     * a trace, so a starved growth chain looked like a planner bug instead of a heuristic
+     * miss. Behaviour is unchanged; this only makes the fallback observable. */
+    private static void note(String why) {
+        if (com.aecraftroute.addon.config.CraftRouteConfig.isDebugLogging())
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.info("[AE-Craftroute] Feedback ring not modelled: {}", why);
     }
 }

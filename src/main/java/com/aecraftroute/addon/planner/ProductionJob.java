@@ -83,6 +83,7 @@ public final class ProductionJob {
      * waitingFor may still contain outputs from already accepted dispatches. */
     public boolean validateRemainingTasks(Map<IPatternDetails,Long> tasks) {
         if(invalid) return false;
+        String mismatch=null;
         try {
             var certified=new HashMap<IPatternDetails,Long>();
             cursor.remainingCounts().forEach((variant,count)->certified.merge(variant.pattern(),count,Math::addExact));
@@ -91,11 +92,31 @@ public final class ProductionJob {
                 if(pattern==null || count==null || count<0) throw new IllegalArgumentException("Invalid native task");
                 if(count>0) actual.put(pattern,count);
             });
-            if(certified.equals(actual)) return true;
-        } catch(RuntimeException malformed) { }
+            if(sameTasks(certified,actual)) return true;
+            mismatch=describeMismatch(certified,actual);
+        } catch(RuntimeException malformed) { mismatch="unreadable native task map: "+malformed; }
         invalid=true;
-        com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Native tasks disagree with production cursor; cancel and resubmit. No inventory mutation.");
+        com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Native tasks disagree with production cursor ({}); cancel and resubmit. No inventory mutation.",mismatch);
         return false;
+    }
+    /** Preserve pattern-defined equality: matching visible stacks alone cannot prove
+     * identical container returns, substitution rules, or provider behavior. */
+    private static boolean sameTasks(Map<IPatternDetails,Long> certified,Map<IPatternDetails,Long> actual) {
+        return certified.equals(actual);
+    }
+    static boolean samePattern(IPatternDetails a,IPatternDetails b) {
+        return Objects.equals(a,b);
+    }
+    /** Bounded diagnostics. A third-party pattern without value equality shows up as the
+     * same class counted on both sides, which is the signature of a reload-time identity
+     * mismatch rather than a genuinely different program. */
+    private static String describeMismatch(Map<IPatternDetails,Long> certified,Map<IPatternDetails,Long> actual) {
+        var text=new StringBuilder("certified=").append(certified.size()).append(" actual=").append(actual.size());
+        int shown=0;
+        for(var e:certified.entrySet()) {if(shown++>=4) {text.append(" ...");break;} text.append(" [want ").append(e.getKey().getClass().getSimpleName()).append('x').append(e.getValue()).append(']');}
+        shown=0;
+        for(var e:actual.entrySet()) {if(shown++>=4) {text.append(" ...");break;} text.append(" [have ").append(e.getKey().getClass().getSimpleName()).append('x').append(e.getValue()).append(']');}
+        return text.toString();
     }
     /** Execution position, for stall diagnostics: unchanged means nothing dispatched. */
     public ProductionCursor.Position position() { return cursor.position(); }
@@ -105,7 +126,7 @@ public final class ProductionJob {
         cursor.remainingCounts().forEach((variant,count)->merged.merge(variant.pattern(),count,Math::addExact));
         return merged;
     }
-    public boolean allows(IPatternDetails p) { return !invalid && cursor.current()!=null && cursor.current().pattern().equals(p); }
+    public boolean allows(IPatternDetails p) { return !invalid && cursor.current()!=null && samePattern(cursor.current().pattern(),p); }
     public void accepted(IPatternDetails p) {
         if(!allows(p)) throw new IllegalStateException("Uncertified dispatch");
         cursor.accepted(cursor.current());
@@ -123,24 +144,68 @@ public final class ProductionJob {
             return null;
         }
         var extracted=new KeyCounter[slots.size()];
-        for(int i=0;i<slots.size();i++) {
-            extracted[i]=new KeyCounter(); var input=patternInputs[i];
-            for(var portion:slots.get(i).portions()) {
-                var stack=portion.template(); long count=Math.multiplyExact(stack.amount(),portion.multiplier());
-                if(!input.isValid(stack.what(),level) || inventory.extract(stack.what(),count,Actionable.SIMULATE)<count) {
-                    CraftingCpuHelper.reinjectPatternInputs(inventory,extracted); return null;
+        // Every debit below is real (MODULATE). A pattern that throws while it is being read
+        // - an overflowing saved amount, a third-party getRemainingKey - must not unwind into
+        // AE2 with the earlier slots already taken out of the CPU inventory.
+        try {
+            for(int i=0;i<slots.size();i++) {
+                extracted[i]=new KeyCounter(); var input=patternInputs[i];
+                for(var portion:slots.get(i).portions()) {
+                    // Native extraction asks the inventory for fuzzy templates of the encoded
+                    // key and keeps the ones IInput.isValid accepts, so a pattern whose slots
+                    // accept several variants is served from any of them. Matching only the
+                    // encoded key would wait forever on an equivalent-but-not-identical stack.
+                    if(!takePortion(inventory,input,extracted[i],containers,portion.template(),portion.multiplier(),level)) {
+                        CraftingCpuHelper.reinjectPatternInputs(inventory,extracted); return null;
+                    }
                 }
-                long got=inventory.extract(stack.what(),count,Actionable.MODULATE);
-                extracted[i].add(stack.what(),got);
-                if(got!=count) { CraftingCpuHelper.reinjectPatternInputs(inventory,extracted); return null; }
             }
+            for(var out:patternOutputs) outputs.add(out.what(),out.amount());
+            return extracted;
+        } catch(RuntimeException | Error unreadable) {
+            CraftingCpuHelper.reinjectPatternInputs(inventory,extracted);
+            invalid=true;
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Certified dispatch could not read its own pattern; inputs returned, job canceled. No items lost.",unreadable);
+            return null;
         }
-        for(var out:patternOutputs) outputs.add(out.what(),out.amount());
-        for(int i=0;i<slots.size();i++) for(var portion:slots.get(i).portions()) {
-            var remaining=patternInputs[i].getRemainingKey(portion.template().what());
-            if(remaining!=null) containers.add(remaining,portion.multiplier());
+    }
+    /** Native {@code CraftingCpuHelper.extractPatternInputs}: whole units of one slot, taken from
+     * the encoded key first and only then from fuzzy templates the slot also accepts. Exact first
+     * keeps the certified program's own key accounting exact; the fuzzy fallback mirrors native
+     * substitution, without which a job would wait forever on an equivalent-but-not-identical
+     * stack. Returns false when the slot could not be filled completely. */
+    private static boolean takePortion(ICraftingInventory inventory,IPatternDetails.IInput input,KeyCounter slot,
+            KeyCounter containers,GenericStack template,long units,Level level) {
+        long perUnit=template.amount();
+        if(perUnit<=0) throw new IllegalArgumentException("Pattern slot template has no amount");
+        long left=units;
+        long exact=fill(inventory,input,slot,containers,template,left,perUnit,level,template.what());
+        if(exact<0) return false;
+        left-=exact;
+        if(left>0) for(var candidate:inventory.findFuzzyTemplates(template.what())) {
+            if(left<=0) break;
+            if(candidate==null || candidate.equals(template.what()) || !input.isValid(candidate,level)) continue;
+            long filled=fill(inventory,input,slot,containers,template,left,perUnit,level,candidate);
+            if(filled<0) return false;
+            left-=filled;
         }
-        return extracted;
+        return left<=0;
+    }
+    /** Takes as many whole {@code perUnit} units of one key as the inventory holds, up to
+     * {@code wanted}. Returns the number of units taken, or -1 when the inventory handed over a
+     * partial unit (a broken inventory; the caller reinjects and cancels). */
+    private static long fill(ICraftingInventory inventory,IPatternDetails.IInput input,KeyCounter slot,
+            KeyCounter containers,GenericStack template,long wanted,long perUnit,Level level,AEKey candidate) {
+        if(candidate==null || wanted<=0 || !input.isValid(candidate,level)) return 0;
+        long available=inventory.extract(candidate,Math.multiplyExact(wanted,perUnit),Actionable.SIMULATE);
+        long take=Math.min(wanted,available/perUnit);
+        if(take<=0) return 0;
+        long got=inventory.extract(candidate,Math.multiplyExact(take,perUnit),Actionable.MODULATE);
+        slot.add(candidate,got);
+        if(got!=Math.multiplyExact(take,perUnit)) return -1;
+        var remaining=input.getRemainingKey(candidate);
+        if(remaining!=null) containers.add(remaining,take);
+        return take;
     }
     public CompoundTag save(HolderLookup.Provider registries) {
         return save(pattern->pattern.getDefinition().toTag(registries),stack->GenericStack.writeTag(registries,stack));

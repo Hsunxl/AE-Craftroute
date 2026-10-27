@@ -50,6 +50,43 @@ public final class DeferredFeedbackReservation {
         return total;
     }
 
+    /** Release-safe wrapper for {@link #potentialInput}.
+     * A pattern whose slots cannot be resolved (a foreign IPatternDetails with no
+     * candidates, or an out-of-range multiplier) is NOT proof that the job is corrupt,
+     * so the caller must keep holding instead of cancelling a healthy crafting job.
+     * Non-zero means "a future consumer may still exist"; it is deliberately
+     * saturated rather than exact because only zero/non-zero changes the decision.
+     */
+    public static <T> long pendingInputOrUnknown(Map<IPatternDetails,T> tasks,ToLongFunction<T> count,
+            AEKey feedback,Level level) {
+        try {return potentialInput(tasks,count,feedback,level);}
+        catch(RuntimeException unresolvable) {return Long.MAX_VALUE;}
+    }
+
+    /** Upper bound on pattern firings for one job.
+     * Matches the planner demand cap; a saved job above it is corrupt rather than
+     * merely large, and must be rejected before its counts can wedge feedback release
+     * (a saturated {@link #potentialInput} holds credit forever on a job that can
+     * never drain its own tasks).
+     */
+    public static final long MAX_TASK_RUNS=1_000_000_000_000L;
+
+    /** Fail-closed validation of native task counts restored from a save file.
+     * The provider never inherits a job whose own counters cannot drain, because a
+     * non-zero {@link #potentialInput} would then pin deferred feedback forever.
+     */
+    public static <T> void requireSaneRuns(Map<IPatternDetails,T> tasks,ToLongFunction<T> count) {
+        long total=0;
+        for(var task:tasks.entrySet()) {
+            long times=count.applyAsLong(task.getValue());
+            if(times<0)throw new IllegalArgumentException("Negative saved pattern run count");
+            if(times==0)continue;
+            try {total=Math.addExact(total,times);}
+            catch(ArithmeticException overflow){throw new IllegalArgumentException("Saved pattern run counts overflow",overflow);}
+            if(total>MAX_TASK_RUNS)throw new IllegalArgumentException("Saved pattern run counts exceed the demand cap");
+        }
+    }
+
     /** Snapshot BEFORE calling the provider, which may clear/mutate input counters.
      * Commit this count only on successful push; failed pushes are reinjected natively.
      */
