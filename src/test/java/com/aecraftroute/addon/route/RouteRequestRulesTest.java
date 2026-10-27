@@ -10,6 +10,18 @@ class RouteRequestRulesTest {
     @Test void actualOperationsAwaitServerConfirmation() {
         for(var action:new String[]{"encode","takecache","upload","restore","lock","replan"})assertTrue(RouteRequestRules.mutation(action));
     }
+    @Test void requestAmountsOutsideThePlanRangeAreRefusedBeforePlanning() {
+        assertEquals(1,RouteRequestRules.requirePlanAmount(1));
+        assertEquals(RouteGraphMath.MAX_DEMAND,RouteRequestRules.requirePlanAmount(RouteGraphMath.MAX_DEMAND));
+        assertEquals("目标数量必须大于零",assertThrows(IllegalArgumentException.class,()->RouteRequestRules.requirePlanAmount(0)).getMessage());
+        // A packet is not the client field: Long.MAX_VALUE must be refused here, not deep
+        // inside the canvas planner multiplyExact where it can only surface as a generic failure.
+        var tooLarge=assertThrows(IllegalArgumentException.class,
+                ()->RouteRequestRules.requirePlanAmount(RouteGraphMath.MAX_DEMAND+1));
+        assertTrue(tooLarge.getMessage().contains("目标数量超过上限"),tooLarge.getMessage());
+        assertThrows(IllegalArgumentException.class,()->RouteRequestRules.requirePlanAmount(Long.MAX_VALUE));
+        assertThrows(IllegalArgumentException.class,()->RouteRequestRules.requirePlanAmount(-1));
+    }
     @Test void pendingOperationsExpireRatherThanBlockingForever() {
         assertFalse(RouteRequestRules.expired(300,100));assertTrue(RouteRequestRules.expired(301,100));
     }

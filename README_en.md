@@ -38,7 +38,7 @@ The verdict is split into four stages. The output of each stage is the sole inpu
 
 **3. Replay validation.** A candidate plan found by the search is not returned immediately. The candidate program is replayed forward in order, checking step by step whether the inputs of each step are satisfied at the moment that step executes. A plan that passes the whole replay is returned as a `CertifiedCraftingPlan`. That object carries the starting capital `usedItems` and the execution order `program`; its `missingItems()` is always empty, because passing the replay means the inputs of every step are satisfied at the moment it executes.
 
-**4. Execution.** The CPU bridge dispatches in program order, keeps feedback in the CPU inventory for the next round, and delivers the final output once `waitingFor` is empty and the program is complete. Program and cursor persist with the CPU's NBT; after a server stop and restart, an in-flight job resumes from the save and continues.
+**4. Execution.** The CPU bridge dispatches in program order and keeps feedback in the CPU inventory for the next round. The final output is delivered only once the program is complete and no return of the target itself is still in flight. Player-initiated jobs carry no requester link (native AE2 builds one only for machines), so in that case the finished output is returned to the ME network, exactly like native AE2, instead of being held inside the CPU forever. Returns of any other key - byproducts, catalysts the machine consumed, containers a provider voided - are never waited for: a single return that never arrives would pin the CPU forever, so those leftovers stay in the CPU inventory and the native `storeItems` returns them to the network when the job ends. Program and cursor persist with the CPU's NBT; after a server stop and restart, an in-flight job resumes from the save and continues. A certified plan is not dispatched through the public `CraftingService.submitJob` entry point: some third-party CPU bridges (such as Thunderbolt) reject every non-native `ICraftingPlan` at that entry's HEAD with a fabricated `CPU_OFFLINE`, before the native or AdvancedAE selector ever runs. Certified plans therefore call the compatible cluster's own `submitJob` contract directly - only the native `CraftingCPUCluster` and AdvancedAE clusters, which implement the certified execution protocol, are eligible, and the usual active/busy/storage/auto-select checks still apply. Trinity/ECO and other execution protocols are never handed a certified plan. A certified plan describes patterns and amounts rather than a machine, so changing the executor cannot invalidate anything that was proven. Non-certified native plans still go through AE2's own submission path.
 
 ### Conditions behind the four outcomes
 
@@ -156,7 +156,59 @@ if (CraftRouteCrafting.isLoaded()) {
 
 ---
 
-## 8. Project structure
+## 8. VM kernel and performance optimization
+
+To improve planning performance for large batch crafting requests, this extension implements a numeric VM kernel as a candidate-path optimization.
+
+### 8.1 VM kernel architecture
+
+**Design goal.** Attempt constructive forward batch hints before backward search to quickly find feasible crafting batch sequences. This hint serves only as a candidate and must pass independent `certify()` validation before acceptance.
+
+**Core components.**
+
+- **`NumericProgramCompiler`**: Compiles the pattern graph into compact bytecode programs. Uses sparse instruction encoding, emitting only non-zero quantity keys. Opcodes include:
+  - `CHECK_PREFIX` (1): Check if inventory prefix satisfies input requirements
+  - `LIMIT_OUTPUT` (2): Limit output to prevent overflow
+  - `APPLY_DELTA` (3): Apply net change amounts
+  - `RECORD_PATTERN` (4): Record pattern usage
+  - `HALT` (5): Atomic commit
+
+- **`CompiledNumericProgram`**: Immutable request-local bytecode containing instruction arrays, operands, constant pool, and entry points.
+
+- **`NumericCraftingVM`**: Executes compiled programs. Atomic semantics: all writes affect a private copy, visible only at `HALT`. Supports catalyst/seed semantics (`count=min(count, 1+(working-key-input)/-delta)`).
+
+- **`NetDeltaOracle`**: Pure-data lower bound analysis computing net gain for each material. Used only for lower bound estimation, never for pruning, ordering, or feasibility proofs.
+
+### 8.2 Candidate path mechanism
+
+**Workflow.**
+
+1. `ProductionPlanner.probe()` calls `NumericProgramCompiler` to compile the pattern graph before backward search (within the same budget).
+2. Calls `NumericCraftingVM.execute()` for each candidate batch to simulate execution.
+3. Constructs a candidate crafting word (word) containing the target and all batch steps.
+4. **Mandatory independent verification**: `certify(witness, target, increment, explored)` performs forward replay from scratch, checking if inputs are satisfied at each step's execution time.
+5. Only when `certified.status==FEASIBLE` and budget has not expired, the candidate is accepted.
+
+**Key guarantees.**
+
+- ✅ **Candidate word never replaces proof**: VM results must pass independent `certify()` verification
+- ✅ **Limits never relaxed**: probe budget and search budget share the same deadline
+- ✅ **Atomic execution**: VM execution failures never pollute inventory
+- ✅ **Exact overflow protection**: Uses `addExact`/`multiplyExact` to prevent silent overflow
+
+### 8.3 Performance characteristics
+
+- **Hot path optimization**: 1000/1360/2000 quantity requests complete in 1-3 ms (after warmup)
+- **Cold start**: 256-stage chains fall back to backward search within 605-619 ms
+- **Budget control**: `probeExpired(allowance)` = `expired() || System.nanoTime()-started>=allowance`
+
+### 8.4 Relationship with old VM
+
+Version `1.13.19-local.32` removed the old stack-based VM engine (`CraftingVM`, `CraftingBytecode`, `Opcode`, etc.). The new VM kernel is a completely independent implementation, serving only as a candidate-path optimization without affecting the main search algorithm.
+
+---
+
+## 9. Project structure
 
 ```
 src/main/java/com/aecraftroute/addon/
@@ -196,7 +248,7 @@ src/main/resources/
 
 ---
 
-## 9. Building and testing
+## 10. Building and testing
 
 ```bash
 # Single build; output in build/libs/
@@ -217,6 +269,6 @@ The current offline regression is 38 suites and 271 tests, with 0 failures, 0 er
 
 ---
 
-## 10. License and acknowledgement
+## 11. License and acknowledgement
 
 Licensed under LGPL-3.0; the full text is in [LICENSE](LICENSE). Version history is in [CHANGELOG.md](CHANGELOG.md). The use and licensing of third-party work are in [ATTRIBUTIONS.md](ATTRIBUTIONS.md); the history of the earlier implementation is in [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).

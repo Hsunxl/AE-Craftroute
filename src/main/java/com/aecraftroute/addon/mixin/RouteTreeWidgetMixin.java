@@ -15,9 +15,21 @@ public abstract class RouteTreeWidgetMixin {
     @Shadow private CraftingTreeHelper.NodeManager _nodeManager;
     @Shadow private java.awt.Point getMousePoint(double x, double y) { throw new AssertionError(); }
     @Shadow private boolean isMouseOutScreen(double x, double y) { throw new AssertionError(); }
+    @Shadow @Final protected appeng.client.gui.AEBaseScreen<?> screen;
+    @Shadow private int outputX,outputY,spacingX,spacingY,stackLength;
+    @Shadow private float scroll;
+    @Unique private final com.aecraftroute.addon.route.client.RouteTreeMouseCache aecraftroute$mouseCache=
+            new com.aecraftroute.addon.route.client.RouteTreeMouseCache();
+    @Unique private java.awt.Point aecraftroute$mousePoint;
+    @Unique private java.awt.Point aecraftroute$lookupPoint(double x,double y) {
+        if(aecraftroute$mouseCache.changed(x,y,screen.getGuiLeft(),screen.getGuiTop(),
+                outputX,outputY,spacingX,spacingY,stackLength,scroll))
+            aecraftroute$mousePoint=getMousePoint(x,y);
+        return aecraftroute$mousePoint;
+    }
     @Inject(method = "draw", at = @At("TAIL"))
     private void aecraftroute$hover(net.minecraft.client.gui.GuiGraphics g,int left,int top,int x,int y,CallbackInfo ci) {
-        var node = _nodeManager == null || isMouseOutScreen(x,y) ? null : _nodeManager.map.get(getMousePoint(x,y));
+        var node = _nodeManager == null || isMouseOutScreen(x,y) ? null : _nodeManager.map.get(aecraftroute$lookupPoint(x,y));
         if (node == null || node.stack == null) {
             RouteClient.selectedTreeKey = null;
             RouteClient.selectedTreeAmount = 0;
@@ -31,7 +43,7 @@ public abstract class RouteTreeWidgetMixin {
     @Inject(method = "mouseClicked", at = @At("HEAD"), cancellable = true)
     private void aecraftroute$select(double x, double y, int button, CallbackInfoReturnable<Boolean> ci) {
         if (button != 1 || !net.minecraft.client.gui.screens.Screen.hasShiftDown() || _nodeManager == null || isMouseOutScreen(x,y)) return;
-        var node = _nodeManager.map.get(getMousePoint(x,y));
+        var node = _nodeManager.map.get(aecraftroute$lookupPoint(x,y));
         if (node != null && node.stack != null) {
             RouteClient.open(net.minecraft.client.Minecraft.getInstance().screen, node.stack.what(), null,
                     node.amount == null ? 0 : node.amount, "合成树", aecraftroute$path(node));

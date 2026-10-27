@@ -36,14 +36,22 @@ public final class RouteApply {
     /** Validation only: no session state is changed until a certified plan commits. */
     public static Prepared prepare(IGrid grid,RoutePolicy<AEKey> base,HolderLookup.Provider registries,
                                     AEKey target,long amount,List<Node> nodes) {
-        if(nodes.size()>128)throw new IllegalArgumentException("强制画布最多 128 个分支");
+        if(nodes.size()>RouteCanvasPayload.MAX_NODES)throw new IllegalArgumentException("强制画布最多 "+RouteCanvasPayload.MAX_NODES+" 个分支");
         var paths=new ArrayList<RoutePolicy.Path<AEKey>>();var locked=new ArrayList<String>();var problems=new ArrayList<String>();
         for(var node:nodes) {
+            String label=node.label()==null?node.path():node.label();
             AEKey material=null;
-            try {if(node.keyTag()!=null)material=RouteView.decodeKey(node.keyTag(),registries);}catch(Exception ignored){}
+            String decodeFailure=null;
+            try {if(node.keyTag()!=null)material=RouteView.decodeKey(node.keyTag(),registries);}
+            catch(Exception failure){
+                Throwable cause=failure;
+                while(cause.getCause()!=null)cause=cause.getCause();
+                decodeFailure=cause.getClass().getSimpleName()+": "+cause.getMessage();
+            }
             final AEKey resolved=material;
-            if(material==null || node.choiceId()==null || node.choiceId().isBlank()) {problems.add("「"+node.label()+"」材料或样板标识无效");continue;}
-            if(node.path()==null || !node.path().matches("root(?:/[0-9]{1,3}){0,24}")) {problems.add("「"+node.label()+"」缺少有效路径，请重新打开画布");continue;}
+            if(material==null || node.choiceId()==null || node.choiceId().isBlank()) {
+                problems.add("「"+label+"」材料或样板标识无效"+(decodeFailure==null?"":"（"+decodeFailure+"）"));continue;}
+            if(!RouteGraphMath.validPath(node.path())) {problems.add("「"+label+"」缺少有效路径，请重新打开画布");continue;}
             paths.add(new RoutePolicy.Path<>(node.path(),resolved,node.choiceId()));locked.add(node.label()==null?node.path():node.label()+" @ "+node.path());
         }
         if(paths.isEmpty())problems.add("画布没有可执行的路径分支");

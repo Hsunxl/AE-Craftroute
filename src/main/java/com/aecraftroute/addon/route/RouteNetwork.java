@@ -19,15 +19,19 @@ public final class RouteNetwork {
     public static final Gson GSON = new Gson();
     // Installed only by the client event subscriber, avoiding server class-loading of GUI/JEI.
     public static Consumer<Response> clientHandler = response -> {};
+    /** IdentityHashMap keys must remain object-identity based; its values need String equality. */
+    static boolean hasPatternIdentity(Map<appeng.api.crafting.IPatternDetails,String> identities,String requested) {
+        return requested!=null && identities.values().stream().anyMatch(requested::equals);
+    }
     public record Request(int menu, int sequence, String action, AEKey key, String argument) implements CustomPacketPayload {
         public Request {
-            if(action==null || argument==null || argument.length()>(action.equals("encode")||action.equals("apply")?24000:Set.of("workbench","takecache","upload").contains(action)?1024:128))
+            if(action==null || argument==null || argument.length()>(action.equals("encode")||action.equals("apply")?RouteCanvasPayload.MAX_CHARACTERS:Set.of("workbench","takecache","upload","discardcache").contains(action)?1024:128))
                 throw new IllegalArgumentException("路线操作参数超过限制");
         }
         public static final Type<Request> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("aecraftroute", "route_request"));
         public static final StreamCodec<RegistryFriendlyByteBuf, Request> CODEC = new StreamCodec<>() {
-            public Request decode(RegistryFriendlyByteBuf b) { return new Request(b.readVarInt(), b.readVarInt(), b.readUtf(16), AEKey.readOptionalKey(b), b.readUtf(24000)); }
-            public void encode(RegistryFriendlyByteBuf b, Request p) { b.writeVarInt(p.menu); b.writeVarInt(p.sequence); b.writeUtf(p.action,16); AEKey.writeOptionalKey(b,p.key); b.writeUtf(p.argument,24000); }
+            public Request decode(RegistryFriendlyByteBuf b) { return new Request(b.readVarInt(), b.readVarInt(), b.readUtf(16), AEKey.readOptionalKey(b), b.readUtf(RouteCanvasPayload.MAX_CHARACTERS)); }
+            public void encode(RegistryFriendlyByteBuf b, Request p) { b.writeVarInt(p.menu); b.writeVarInt(p.sequence); b.writeUtf(p.action,16); AEKey.writeOptionalKey(b,p.key); b.writeUtf(p.argument,RouteCanvasPayload.MAX_CHARACTERS); }
         };
         public Type<Request> type() { return TYPE; }
     }
@@ -57,7 +61,7 @@ public final class RouteNetwork {
                 var node = host == null ? null : host.getActionableNode();
                 if (node == null || !node.isActive()) throw new IllegalArgumentException("终端没有连接可用的 ME 网络");
                 var grid = node.getGrid();
-                if(Set.of("workbench","encode","takecache","upload").contains(request.action())) {
+                if(Set.of("workbench","encode","takecache","upload","discardcache").contains(request.action())) {
                     var view=RouteWorkbench.ViewRequest.first();String message="";
                     switch(request.action()) {
                         case "workbench" -> view=request.argument().isBlank()?view:GSON.fromJson(request.argument(),RouteWorkbench.ViewRequest.class);
@@ -69,6 +73,10 @@ public final class RouteNetwork {
                         case "upload" -> {
                             var upload=GSON.fromJson(request.argument(),RouteWorkbench.Upload.class);
                             message=RouteWorkbench.upload(player,menu,grid,upload);view=upload.view();
+                        }
+                        case "discardcache" -> {
+                            var discard=GSON.fromJson(request.argument(),RouteWorkbench.Discard.class);
+                            message=RouteWorkbench.discardCorrupt(player,discard);view=discard.view();
                         }
                     }
                     context.reply(new Response(request.menu(),request.sequence(),GSON.toJson(RouteWorkbench.view(player,menu,grid,view,message))));
@@ -83,12 +91,21 @@ public final class RouteNetwork {
                 String message = "这些设置只对你在当前网络生效；退出登录后清空";
                 var patterns = key == null ? List.<appeng.api.crafting.IPatternDetails>of()
                         : new ArrayList<>(grid.getCraftingService().getCraftingFor(key));
+                var identities=new IdentityHashMap<appeng.api.crafting.IPatternDetails,String>();
+                int invalidIdentities=0;
+                for(var pattern:patterns) try {identities.put(pattern,RouteIdentity.pattern(pattern,player.registryAccess()));}
+                    catch(RuntimeException invalid) { invalidIdentities++; /* Do not hide healthy patterns. */ }
                 boolean changed = false;
                 switch (request.action()) {
                     case "query", "preview" -> {}
                     case "begin" -> {PLANNING.begin(player.getUUID());RouteSessions.begin(grid,player.getUUID(),menu.containerId);}
                     case "restore" -> { policy=RouteSessions.restore(grid,player.getUUID(),menu.containerId);changed=true;message="已还原进入画布时的合成路线"; }
                     case "clear" -> { policy = new RoutePolicy<>(Map.of()); changed = true; message = "已撤销你在当前网络的全部路线改动"; }
+                    case "clearcanvas" -> {
+                        changed=policy.canvas()!=null;
+                        policy=policy.withoutCanvas();
+                        message=changed?"已撤销强制画布，保留逐材料路线设置":"当前没有已应用的强制画布；逐材料路线设置未变";
+                    }
                     case "replan" -> {
                         if (menu instanceof CraftConfirmMenu confirm) { confirm.setAutoStart(false); confirm.replan(); message = "已重新计算；回到合成确认页查看结果"; }
                         else message = "已保存改动；回到终端重新点合成即可查看";
@@ -96,22 +113,22 @@ public final class RouteNetwork {
                     case "lock", "ban", "auto", "stock" -> {
                         if (key == null) throw new IllegalArgumentException("请先选择一个材料");
                         if (!com.aecraftroute.addon.config.CraftRouteConfig.isProxyEnabled()) throw new IllegalArgumentException("AE-Craftroute 的自动合成没有开启");
-                        if ((request.action().equals("lock") || request.action().equals("ban")) && patterns.stream().noneMatch(p ->
-                                RouteIdentity.pattern(p, player.registryAccess()).equals(request.argument())))
+                        if ((request.action().equals("lock") || request.action().equals("ban"))
+                                && !hasPatternIdentity(identities,request.argument()))
                             throw new IllegalArgumentException("这张样板已经变了，请重新打开页面再选");
                         policy = policy.change(key, request.action(), request.argument()); changed = true;
                         message = "已改用你选的配方；系统不会再换别的路线";
                     }
                     default -> throw new IllegalArgumentException("未知路线操作");
                 }
-                RouteSessions.put(grid, player.getUUID(), policy);
+                if(changed)RouteSessions.put(grid, player.getUUID(), policy);
                 // Cancel/replace old confirmation immediately, not just when the UI's refresh button is pressed.
                 if (changed && menu instanceof CraftConfirmMenu confirm) { confirm.setAutoStart(false); confirm.replan(); }
                 var rule = policy.rule(key);
-                var ordered = new ArrayList<>(patterns);
+                var ordered = new ArrayList<>(patterns.stream().filter(identities::containsKey).toList());
                 if (rule.locked() != null) {
                     for (int i = 0; i < ordered.size(); i++) {
-                        if (RouteIdentity.pattern(ordered.get(i), player.registryAccess()).equals(rule.locked())) {
+                        if (identities.get(ordered.get(i)).equals(rule.locked())) {
                             ordered.add(0, ordered.remove(i));
                             break;
                         }
@@ -120,28 +137,37 @@ public final class RouteNetwork {
                 var choices = new ArrayList<RouteView.Choice>();
                 int size = 0;
                 boolean truncated = false;
+                int invalidChoices = invalidIdentities;
                 for (var p : ordered) {
                     if (choices.size() >= 64) { truncated = true; break; }
-                    var inputs = new ArrayList<RouteView.Stack>();
-                    boolean alternatives = false;
-                    for (var in : p.getInputs()) {
-                        var possible = in.getPossibleInputs();
-                        if (possible.length == 0) continue;
-                        alternatives |= possible.length > 1;
-                        inputs.add(RouteView.Stack.of(possible[0].what(), Math.multiplyExact(possible[0].amount(), in.getMultiplier()), player.registryAccess()));
+                    RouteView.Choice choice;
+                    try {
+                        choice = RoutePatternChoices.read(p, identities.get(p),
+                                stack -> RouteView.Stack.of(stack.what(), stack.amount(), player.registryAccess()));
+                    } catch (RuntimeException invalid) {
+                        invalidChoices++;
+                        continue;
                     }
-                    var outputs = p.getOutputs().stream().map(s -> RouteView.Stack.of(s.what(),s.amount(),player.registryAccess())).toList();
-                    var choice = new RouteView.Choice(RouteIdentity.pattern(p, player.registryAccess()), inputs, outputs, alternatives);
                     size += GSON.toJson(choice).length();
                     if (size > 170000) { truncated = true; break; }
                     choices.add(choice);
+                }
+                if (invalidChoices > 0) message += "；另有 " + invalidChoices + " 张异常样板未显示";
+                var wanted=choices.stream().map(RouteView.Choice::id).collect(java.util.stream.Collectors.toSet());
+                var sources=RoutePatternSources.find(grid,player.serverLevel(),wanted);
+                for(int i=0;i<choices.size();i++) {
+                    var choice=choices.get(i);
+                    var enriched=new RouteView.Choice(choice.id(),choice.inputs(),choice.outputs(),choice.alternatives(),
+                            sources.getOrDefault(choice.id(),List.of()));
+                    int delta=GSON.toJson(enriched).length()-GSON.toJson(choice).length();
+                    if(size+delta<=170000) {choices.set(i,enriched);size+=delta;}else truncated=true;
                 }
                 RoutePlanView planView = null;
                 reply(context, request, new RouteView.Reply(message, choices, rule.locked(),
                         new ArrayList<>(rule.banned()), rule.stockOnly(), policy.rules().size(), truncated,
                         planView));
             } catch (Exception e) {
-                reply(context, request, new RouteView.Reply("操作失败：" + e.getMessage(), List.of(), null, List.of(), false, 0, false));
+                reply(context, request, new RouteView.Reply("操作失败：" + RouteFailureText.message(e), List.of(), null, List.of(), false, 0, false));
             }
         });
     }
@@ -152,16 +178,14 @@ public final class RouteNetwork {
                                   appeng.api.networking.IGrid grid,RoutePolicy<AEKey> base) {
         var ticket=PLANNING.replace(player.getUUID(),request.sequence());
         if(ticket==null)return;
-        long amount=1;var nodes=new ArrayList<RouteApply.Node>();
+        long amount=1;java.util.List<RouteApply.Node> nodes=java.util.List.of();
         try {
-            var json=GSON.fromJson(request.argument(),com.google.gson.JsonObject.class);
-            if(json!=null && json.has("amount"))amount=json.get("amount").getAsLong();
-            if(amount<=0)throw new IllegalArgumentException("目标数量必须大于零");
-            if(json!=null && json.has("nodes"))for(var value:json.getAsJsonArray("nodes")) {
-                var e=value.getAsJsonObject();
-                nodes.add(new RouteApply.Node(e.has("k")?e.get("k").getAsString():null,e.has("c")?e.get("c").getAsString():null,
-                        e.has("n")?e.get("n").getAsString():null,e.has("p")?e.get("p").getAsString():null));
-            }
+            // The argument is untrusted client text: parse it with explicit type checks so a
+            // malformed or edited request is refused by its own message instead of surfacing
+            // as a raw Gson failure behind the generic "操作失败" reply.
+            var decoded=RouteCanvasPayload.decode(request.argument());
+            amount=decoded.amount();nodes=decoded.nodes();
+            RouteRequestRules.requirePlanAmount(amount);
             if(request.key()==null)throw new IllegalArgumentException("先选择目标材料");
             boolean apply="apply".equals(request.action());
             RouteRequestRules.requirePlanningEnabled(request.action(),com.aecraftroute.addon.config.CraftRouteConfig.isProxyEnabled());
@@ -209,7 +233,7 @@ public final class RouteNetwork {
             });
         } catch(Exception failure) {
             PLANNING.forget(player.getUUID(),ticket);
-            reply(context,request,new RouteView.Reply("操作失败："+failure.getMessage(),List.of(),null,List.of(),false,base.rules().size(),false));
+            reply(context,request,new RouteView.Reply("操作失败："+RouteFailureText.message(failure),List.of(),null,List.of(),false,base.rules().size(),false));
         }
     }
     private static void reply(IPayloadContext context, Request req, RouteView.Reply reply) {

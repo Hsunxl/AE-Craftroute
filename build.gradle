@@ -51,7 +51,12 @@ neoForge {
             gameDirectory = project.file('run-selftest')
             jvmArguments.add('-Daecraftroute.selftest=1')
             jvmArguments.add('-Daecraftroute.selftest.exit=true')
-            jvmArguments.add("-Daecraftroute.selftest.task=${providers.gradleProperty('selftestTask').getOrElse('growth')}")
+            // Plain String, not a GString: ModDevGradle casts jvmArguments entries to String.
+            jvmArguments.add('-Daecraftroute.selftest.task=' + providers.gradleProperty('selftestTask').getOrElse('growth'))
+            if (providers.gradleProperty('mixinExport').isPresent()) {
+                jvmArguments.add('-Dmixin.debug.export=true')
+                jvmArguments.add('-Dmixin.debug.export.filter=appeng.me.service.CraftingService')
+            }
         }
     }
 }
@@ -65,6 +70,19 @@ dependencies {
     def advancedaeJar = providers.gradleProperty('advancedaeJar').getOrElse('../../../mods/AdvancedAE-1.6.12-1.21.1.jar')
     compileOnly files(advancedaeJar)
     testRuntimeOnly files(advancedaeJar)
+    // Exercise the installed scaled-pattern wrapper contract, not only test doubles.
+    testRuntimeOnly files('../../../mods/extendedae_plus-1.6.3.jar')
+    // Opt-in isolated verification of the installed NeoECO + AdvancedAE mixin combination.
+    if (providers.gradleProperty('neoEcoSelftest').isPresent()) {
+        runtimeOnly files('../../../mods/neoecoae-21.2.2.jar')
+        runtimeOnly files('../../../mods/ldlib2-neoforge-1.21.1-2.2.42-all.jar')
+    }
+    if (providers.gradleProperty('extendedAePlusSelftest').isPresent()) {
+        runtimeOnly files('../../../mods/ExtendedAE-1.21-2.2.41-neoforge.jar')
+        runtimeOnly files('../../../mods/extendedae_plus-1.6.3.jar')
+        runtimeOnly files('../../../mods/Glodium-1.21-2.2-neoforge.jar')
+        runtimeOnly files('../../../mods/ae2wtlib-19.5.1.jar')
+    }
     // Independent verification instance: AdvancedAE and AE2's guideme dependency must be
     // loadable at runtime for the dedicated-server selftest.
     runtimeOnly files(advancedaeJar)
@@ -77,10 +95,19 @@ dependencies {
     testRuntimeOnly files(providers.gradleProperty('ae2ctJar').getOrElse('../../../mods/ae2ct-1.21.1-1.1.1.jar'))
     implementation "org.appliedenergistics:appliedenergistics2:${ae2_version}"
     compileOnly "io.github.llamalad7:mixinextras-neoforge:0.5.3"
-    // Thunderbolt-Core was an optional compile-only dependency up to v1.13.15. Since v1.13.16
-    // its algorithm library is stubbed out (com.aecraftroute.addon.compat.thunderbolt), nothing in the
-    // sources references it, and no artifact is needed to build. Re-enabling it means restoring
-    // the v1.13.15 sources and the dependency together, so nothing is declared here.
+    // Thunderbolt-Core algorithm library remains stubbed. The installed 2.0.1 jar is needed
+    // only for its public ExtendedCraftingCpuCluster submission-compatibility interface.
+    def thunderboltJar = providers.gradleProperty('thunderboltJar').getOrElse('../../../mods/thunderbolt-2.0.1.jar')
+    compileOnly files(thunderboltJar)
+    if (providers.gradleProperty('thunderboltSelftest').isPresent()) {
+        runtimeOnly files(thunderboltJar)
+    }
+    def neoEcoJar = providers.gradleProperty('neoEcoJar').getOrElse('../../../mods/neoecoae-21.2.2.jar')
+    testRuntimeOnly files(neoEcoJar)
+    if (providers.gradleProperty('neoEcoSelftest').isPresent()) {
+        runtimeOnly files(neoEcoJar)
+        runtimeOnly files('../../../mods/ldlib2-neoforge-1.21.1-2.2.42-all.jar')
+    }
 
     testImplementation 'org.spongepowered:mixin:0.8.5'
     testImplementation platform('org.junit:junit-bom:5.10.2')
@@ -97,6 +124,40 @@ afterEvaluate {
     sourceSets.test.runtimeClasspath += sourceSets.main.runtimeClasspath
 }
 tasks.named('compileTestJava') { dependsOn 'createMinecraftArtifacts' }
+
+// Minecraft normally exits zero even when the harness logs RESULT=FAIL. Require a
+// fresh, exact result receipt so failed assertions or early exits cannot look green.
+def selftestReceipt = layout.projectDirectory.file('run-selftest/selftest-result.txt').asFile
+def selectedSelftestTask = providers.gradleProperty('selftestTask').getOrElse('growth')
+def expectedSelftestResult = 'PASS task=' + selectedSelftestTask
+  def supportedSelftestTasks = ['growth', 'cancel', 'reload', 'restart1', 'restart2', 'advanced-restart1', 'advanced-restart2',
+    'paths', 'vanilla', 'vanilla-canvas', 'vanilla-canvas-advanced', 'scaled-advanced', 'planning-load',
+    'scaled-native-plan', 'scaled-processing-execution', 'scaled-processing-plain-execution', 'scaled-strict-roundtrip', 'scaled-molecular-execution',
+    'foreign', 'foreign-advanced', 'foreign-advanced-plus',
+    'fallback', 'fallback-small', 'fallback-busy', 'partial', 'overestimate',
+    'advanced', 'advanced-overestimate', 'stock-race', 'advanced-stock-race',
+    'rejectonce', 'legacy-feedback', 'legacy-feedback-advanced', 'legacy-feedback-control',
+    'legacy-feedback-reload', 'legacy-feedback-advanced-reload',
+    'legacy-feedback-restart1', 'legacy-feedback-restart2',
+    'legacy-feedback-advanced-restart1', 'legacy-feedback-advanced-restart2',
+    'legacy-feedback-seed-rejectonce', 'legacy-feedback-advanced-seed-rejectonce',
+    'legacy-feedback-corrupt', 'legacy-feedback-advanced-corrupt',
+    'legacy-feedback-oldkeys', 'legacy-feedback-advanced-oldkeys',
+    'legacy-feedback-marker-corrupt', 'legacy-feedback-advanced-marker-corrupt',
+    'legacy-feedback-heldtype-corrupt', 'legacy-feedback-advanced-heldtype-corrupt', 'gate-failure']
+tasks.named('runSelftestServer') {
+    doFirst {
+        // Reject typos before starting Minecraft (whose harness resets its test world).
+        if (!supportedSelftestTasks.contains(selectedSelftestTask))
+            throw new GradleException('Unknown selftest task: ' + selectedSelftestTask)
+        if (selftestReceipt.exists() && !selftestReceipt.delete())
+            throw new GradleException('Cannot remove stale selftest result receipt')
+    }
+    doLast {
+        if (!selftestReceipt.isFile() || selftestReceipt.getText('UTF-8').trim() != expectedSelftestResult)
+            throw new GradleException('Selftest failed or did not finish: expected ' + expectedSelftestResult)
+    }
+}
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'

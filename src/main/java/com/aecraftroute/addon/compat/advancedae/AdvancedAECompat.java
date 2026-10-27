@@ -6,21 +6,9 @@ import net.neoforged.fml.ModList;
 /**
  * AdvancedAE (net.pedroksl.advanced_ae) 弱依赖门面。
  *
- * <p>AdvancedAE 与 AE-Craftroute 在合成计算链路中天然分层兼容（已在 AdvancedAE 源码
- * {@code forge/1.21.1} 分支核实）：
- * <ul>
- *   <li>AE-Craftroute 拦截 {@code CraftingService.beginCraftingCalculation}（HEAD, order=100），
- *       用栈式 VM 计算合成计划 —— 这是 <b>规划层</b>。</li>
- *   <li>AdvancedAE 的 {@code cpu.MixinCraftingService} 只注入 {@code submitJob} 的
- *       {@code findSuitableCraftingCPU}（INVOKE_ASSIGN，cancellable），把现成的
- *       {@code ICraftingPlan} 路由到 {@code AdvCraftingCPUCluster} 执行 —— 这是
- *       <b>CPU 分配/执行层</b>，全仓库零引用 {@code beginCraftingCalculation}。</li>
- * </ul>
- * 因此安装 AdvancedAE 后，AE-Craftroute 的计算逻辑<b>仍然生效</b>：VM 算出的 plan
- * 原样流入 AdvancedAE 的 {@code AdvCraftingCPUCluster}/{@code ExecutingCraftingJob}
- * 执行（复用原版 CraftingCpuHelper/provider.pushPattern 执行机制）。本门面提供
- * 检测 + 启动确认日志。循环增殖另由 AdvancedGrowth* Mixins 覆盖独立量子 CPU，
- * 保留待磨粉水晶并优先派发回料任务；仅规划层兼容并不足以保证循环能执行。
+ * <p>Only registered AE-Craftroute requests enter our planner. Unregistered
+ * third-party requesters retain their own planning and execution layers;
+ * certified plans may be submitted to a compatible AdvancedAE CPU bridge.
  */
 public final class AdvancedAECompat {
 
@@ -44,22 +32,18 @@ public final class AdvancedAECompat {
     }
 
     /**
-     * 安装确认日志（幂等，只打印一次）：AdvancedAE 存在时确认 AE-Craftroute 的计算逻辑
-     * 仍接管规划层（beginCraftingCalculation），AdvancedAE 仅负责 CPU 分配/执行层。
+     * 安装确认日志（仅 debug 模式，幂等）：陈述已注册路线的兼容范围。
      * 在 commonSetup 的 enqueueWork 中调用（mod 列表已完整）。
      */
-    public static void logCompatibilityIfPresent() {
-        if (!isLoaded() || logged) {
+    public static synchronized void logCompatibilityIfPresent() {
+        if (!isLoaded() || logged || !com.aecraftroute.addon.config.CraftRouteConfig.isDebugLogging()) {
             return;
         }
         logged = true;
-        if (com.aecraftroute.addon.config.CraftRouteConfig.isDebugLogging()) {
         CraftRouteAddon.LOGGER.info(
-                "[AE-Craftroute] AdvancedAE detected ({}) — AE-Craftroute computation remains active: "
-                        + "VM computes plans (beginCraftingCalculation layer); AdvancedAE only "
-                        + "routes them to AdvCraftingCPUCluster for execution (submitJob layer). "
-                        + "AdvancedGrowth execution bridge reserves feedback and prioritizes recyclers for new growth jobs.",
+                "[AE-Craftroute] AdvancedAE detected ({}): registered route requests can use certified "
+                        + "planning and compatible CPU execution; unregistered third-party requesters retain "
+                        + "their own planning and execution layers.",
                 MOD_ID);
-        }
     }
 }

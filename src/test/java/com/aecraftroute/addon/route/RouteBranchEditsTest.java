@@ -21,6 +21,11 @@ class RouteBranchEditsTest {
         var e=new RouteBranchEdits();e.hide("root/a");
         assertFalse(e.shown("root","root/a","iron"));assertTrue(e.shown("root","root/b","gold"));
     }
+    @Test void deletingOneOccurrenceKeepsSameMaterialOnOtherBranches() {
+        var e=new RouteBranchEdits();e.hide("root/0/1");
+        assertFalse(e.shown("root/0","root/0/1","iron"));
+        assertTrue(e.shown("root/2","root/2/0","iron"));
+    }
     @Test void deletingSubtreeKeepsMaterialAndOtherBranchIndependent() {
         var e=new RouteBranchEdits();e.collapse("root/a");
         assertFalse(e.expanded("root/a"));assertTrue(e.expanded("root/b"));
@@ -56,5 +61,13 @@ class RouteBranchEditsTest {
         assertTrue(e.materialHidden("iron"));
         e.showMaterial("iron");
         assertFalse(e.materialHidden("iron"));
+    }
+    @Test void foldingRoundTripPreservesFiltersAndUndo() {
+        var e=new RouteBranchEdits();e.reveal("root","iron",false);e.hide("root/a");
+        var before=e.snapshot();e.toggleExpanded("root");var folded=e.snapshot();
+        assertFalse(e.expanded("root"));e.toggleExpanded("root");assertEquals(before,e.snapshot());
+        e.restore(folded);assertFalse(e.expanded("root"));
+        assertFalse(e.shown("root","root/a","iron"));assertFalse(e.shown("root","root/b","gold"));
+        e.restore(before);assertTrue(e.expanded("root"));
     }
 }

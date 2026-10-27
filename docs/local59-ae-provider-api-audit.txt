@@ -1,0 +1,60 @@
+Local installed jars API audit, 2026-10-26. Static evidence only; not live addon integration testing.
+--- AdvancedAE-1.6.12-1.21.1.jar SHA256=A01D9718667AC13899013E91C5B0B7708B9B9DB1DA9B8E380772DDE54BBE8F41
+public interface net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost extends appeng.api.util.IConfigurableObject,appeng.helpers.IPriorityHost,appeng.helpers.patternprovider.PatternContainer {
+  public abstract net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogic getLogic();
+  public abstract net.minecraft.world.level.block.entity.BlockEntity getBlockEntity();
+  public abstract java.util.EnumSet<net.minecraft.core.Direction> getTargets();
+  public abstract appeng.api.stacks.AEItemKey getTerminalIcon();
+  public default boolean isVisibleInTerminal();
+  public default appeng.api.inventories.InternalInventory getTerminalPatternInventory();
+  public default long getTerminalSortOrder();
+  public default appeng.api.implementations.blockentities.PatternContainerGroup getTerminalGroup();
+--- AdvancedAE-1.6.12-1.21.1.jar SHA256=A01D9718667AC13899013E91C5B0B7708B9B9DB1DA9B8E380772DDE54BBE8F41
+public class net.pedroksl.advanced_ae.common.entities.AdvPatternProviderEntity extends appeng.blockentity.grid.AENetworkedBlockEntity implements net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost {
+  public net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogic getLogic();
+  public java.util.EnumSet<net.minecraft.core.Direction> getTargets();
+  public appeng.api.stacks.AEItemKey getTerminalIcon();
+--- AdvancedAE-1.6.12-1.21.1.jar SHA256=A01D9718667AC13899013E91C5B0B7708B9B9DB1DA9B8E380772DDE54BBE8F41
+public class net.pedroksl.advanced_ae.common.parts.AdvPatternProviderPart extends appeng.parts.AEBasePart implements net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogicHost {
+  public net.pedroksl.advanced_ae.common.logic.AdvPatternProviderLogic getLogic();
+  public java.util.EnumSet<net.minecraft.core.Direction> getTargets();
+  public appeng.api.stacks.AEItemKey getTerminalIcon();
+--- ExtendedAE-1.21-2.2.41-neoforge.jar SHA256=7484B0A2372E3B639F534E14ACC274A15C6C94BA51063752F00AAA3DD23E6F12
+public class com.glodblock.github.extendedae.common.tileentities.TileExPatternProvider extends appeng.blockentity.crafting.PatternProviderBlockEntity implements com.glodblock.github.extendedae.api.caps.IGenericInvHost {
+  public appeng.api.stacks.AEItemKey getTerminalIcon();
+--- ae2lt-2.1.1.jar SHA256=46F86EEDDE221C983B09241D67C9BC656A7C8D28FD516B7D7592665908940D8E
+public class com.moakiee.ae2lt.blockentity.OverloadedPatternProviderBlockEntity extends appeng.blockentity.crafting.PatternProviderBlockEntity implements com.moakiee.ae2lt.grid.FrequencyBindingHost,com.moakiee.ae2lt.api.patternprovider.WirelessPatternProviderHost {
+  public java.util.EnumSet<net.minecraft.core.Direction> getTargets();
+  public appeng.api.stacks.AEItemKey getTerminalIcon();
+  public appeng.api.implementations.blockentities.PatternContainerGroup getTerminalGroup();
+--- ae2lt-2.1.1.jar SHA256=46F86EEDDE221C983B09241D67C9BC656A7C8D28FD516B7D7592665908940D8E
+public class com.moakiee.ae2lt.blockentity.ExtendedOverloadedPatternProviderBlockEntity extends com.moakiee.ae2lt.blockentity.OverloadedPatternProviderBlockEntity implements com.moakiee.ae2lt.api.pattern.PatternProviderUiProfile {
+  public appeng.api.stacks.AEItemKey getTerminalIcon();
+--- ae2lt-2.1.1.jar SHA256=46F86EEDDE221C983B09241D67C9BC656A7C8D28FD516B7D7592665908940D8E
+public final class com.moakiee.ae2lt.blockentity.PigmeePatternProviderBlockEntity extends appeng.blockentity.grid.AENetworkedBlockEntity implements appeng.util.inv.InternalInventoryHost,appeng.api.networking.crafting.ICraftingProvider,appeng.helpers.patternprovider.PatternContainer {
+  public appeng.api.inventories.InternalInventory getTerminalPatternInventory();
+  public long getTerminalSortOrder();
+  public appeng.api.implementations.blockentities.PatternContainerGroup getTerminalGroup();
+--- ae2ltpp-1.2.1.jar SHA256=041D103340BFAF5D15E80C6882C70F6950EE5578E5A1A702053968C29DF290DF
+public abstract class com.moakiee.ae2lt.packaged.patternprovider.StablePatternProviderBlockEntity extends appeng.blockentity.crafting.PatternProviderBlockEntity implements com.moakiee.ae2lt.api.patternprovider.WirelessPatternProviderHost {
+  public java.util.EnumSet<net.minecraft.core.Direction> getTargets();
+  public appeng.api.implementations.blockentities.PatternContainerGroup getTerminalGroup();
+  public abstract appeng.api.stacks.AEItemKey getTerminalIcon();
+--- ae2ltpp-1.2.1.jar SHA256=041D103340BFAF5D15E80C6882C70F6950EE5578E5A1A702053968C29DF290DF
+public class com.moakiee.ae2lt.packaged.blockentity.PackagedPatternProviderBlockEntity extends com.moakiee.ae2lt.packaged.patternprovider.StablePatternProviderBlockEntity implements com.moakiee.ae2lt.api.frequency.FrequencyBindingHost,com.moakiee.ae2lt.api.pattern.PatternProviderUiProfile,com.moakiee.ae2lt.packaged.logic.multiblock.AdapterPersistentScope {
+  public java.util.EnumSet<net.minecraft.core.Direction> getTargets();
+  public appeng.api.stacks.AEItemKey getTerminalIcon();
+--- ae2ltpp-1.2.1.jar SHA256=041D103340BFAF5D15E80C6882C70F6950EE5578E5A1A702053968C29DF290DF
+public class com.moakiee.ae2lt.packaged.blockentity.WirelessPackagedPatternProviderBlockEntity extends com.moakiee.ae2lt.packaged.blockentity.PackagedPatternProviderBlockEntity {
+  public appeng.api.stacks.AEItemKey getTerminalIcon();
+--- extendedae_plus-1.6.3.jar SHA256=1D89B055A7DE508EC8DD5595EAD646F4734C8FC5F7D843D7606454088118B41A
+public class com.extendedae_plus.content.ae2.MirrorPatternProviderBlockEntity extends appeng.blockentity.crafting.PatternProviderBlockEntity {
+  public boolean isVisibleInTerminal();
+  public appeng.api.inventories.InternalInventory getTerminalPatternInventory();
+--- [应用能源：水晶科技] ae2cs-1.21.1-1.2.1.jar SHA256=CC2406BA7FCECD6FA8495679AE2B41604FD06ED32489A51144E6DE94E5735271
+public interface io.github.lounode.ae2cs.common.me.logic.MeteoritePatternProviderHost extends appeng.helpers.patternprovider.PatternProviderLogicHost,appeng.api.upgrades.IUpgradeableObject {
+--- [应用能源：水晶科技] ae2cs-1.21.1-1.2.1.jar SHA256=CC2406BA7FCECD6FA8495679AE2B41604FD06ED32489A51144E6DE94E5735271
+public interface io.github.lounode.ae2cs.common.me.logic.ResonatingPatternProviderHost extends appeng.helpers.patternprovider.PatternProviderLogicHost,appeng.api.upgrades.IUpgradeableObject {
+--- [应用能源：水晶科技] ae2cs-1.21.1-1.2.1.jar SHA256=CC2406BA7FCECD6FA8495679AE2B41604FD06ED32489A51144E6DE94E5735271
+public interface io.github.lounode.ae2cs.common.me.logic.MirrorPatternProviderHost extends appeng.helpers.patternprovider.PatternProviderLogicHost {
+  public default boolean isVisibleInTerminal();

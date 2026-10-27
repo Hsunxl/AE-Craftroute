@@ -24,7 +24,20 @@ public final class RouteView {
             throw new IllegalArgumentException("材料数据无法读取", e);
         }
     }
-    public record Choice(String id, List<Stack> inputs, List<Stack> outputs, boolean alternatives) {}
+    public record PatternSource(String name,Stack icon,String location,int slot) {}
+    public record Choice(String id, List<Stack> inputs, List<Stack> outputs, boolean alternatives,List<PatternSource> sources) {
+        public Choice {
+            inputs=inputs==null?List.of():List.copyOf(inputs);
+            outputs=outputs==null?List.of():List.copyOf(outputs);
+            sources=sources==null?List.of():List.copyOf(sources);
+        }
+        // Gson may construct records without running the compact constructor when
+        // reading older/foreign replies with omitted fields.
+        @Override public List<Stack> inputs() {return inputs==null?List.of():inputs;}
+        @Override public List<Stack> outputs() {return outputs==null?List.of():outputs;}
+        @Override public List<PatternSource> sources() {return sources==null?List.of():sources;}
+        public Choice(String id,List<Stack> inputs,List<Stack> outputs,boolean alternatives) {this(id,inputs,outputs,alternatives,List.of());}
+    }
     public record PathChoice(String path,String choiceId) {}
     /** Authoritative confirm-menu request; unlike private client menu fields, this is synchronized. */
     public record RequestTarget(String key,long amount) {}
@@ -37,6 +50,13 @@ public final class RouteView {
     }
     public record Reply(String message, List<Choice> choices, String locked, List<String> banned,
                         boolean stockOnly, int ruleCount, boolean truncated, RoutePlanView plan,CanvasChoices canvas,RequestTarget requestTarget) {
+        public Reply {
+            choices=choices==null?List.of():List.copyOf(choices);
+            banned=banned==null?List.of():List.copyOf(banned);
+        }
+        // Gson can read older/foreign records without invoking the compact constructor.
+        @Override public List<Choice> choices() {return choices==null?List.of():choices;}
+        @Override public List<String> banned() {return banned==null?List.of():banned;}
         public Reply(String message,List<Choice> choices,String locked,List<String> banned,
                      boolean stockOnly,int ruleCount,boolean truncated,RoutePlanView plan,CanvasChoices canvas) {
             this(message,choices,locked,banned,stockOnly,ruleCount,truncated,plan,canvas,null);

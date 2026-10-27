@@ -24,20 +24,50 @@ import appeng.me.cluster.implementations.CraftingCPUCluster;
 
 /** Certified dispatch, actual-return feedback, then delivery. No ring detector. */
 @Mixin(value=CraftingCpuLogic.class,remap=false)
-public abstract class ProductionCpuMixin {
+public abstract class ProductionCpuMixin implements com.aecraftroute.addon.compat.CertifiedExecutionOwner {
     @Shadow private ExecutingCraftingJob job;
     @Shadow @Final private ListCraftingInventory inventory;
     @Shadow @Final private CraftingCPUCluster cluster;
     @Shadow private void finishJob(boolean success) { throw new AssertionError(); }
+    @Shadow public void cancel() { throw new AssertionError(); }
     @Shadow private void postChange(AEKey key) { throw new AssertionError(); }
     @Unique private ProductionJob aecraftroute$production;
+    @Override public boolean aecraftroute$hasCertifiedProgram() {return aecraftroute$production!=null;}
+    @WrapMethod(method="tickCraftingLogic")
+    private void aecraftroute$executionOwnership(IEnergyService energy,CraftingService service,Operation<Void> original) {
+        com.aecraftroute.addon.compat.CertifiedExecutionScope.run(this,()->original.call(energy,service));
+    }
     @Unique private final com.aecraftroute.addon.telemetry.LogThrottle aecraftroute$deliveryLogs = new com.aecraftroute.addon.telemetry.LogThrottle();
+    @Unique private Object aecraftroute$lastPosition;
+    @Unique private long aecraftroute$stallSince, aecraftroute$lastStallLog;
+    @Unique private final com.aecraftroute.addon.telemetry.LogThrottle aecraftroute$dispatchLogs = new com.aecraftroute.addon.telemetry.LogThrottle();
+
+    /** A certified job that dispatches nothing for 30 s is a stall, not slow crafting:
+     * print the cursor, the outstanding returns and the CPU inventory so the blocked
+     * step is visible instead of guessing. */
+    @Unique private void aecraftroute$watchStall() {
+        if(aecraftroute$production==null || job==null || aecraftroute$production.done()) return;
+        var access=(GrowthJobAccessor)(Object)job;
+        var position=aecraftroute$production.position();
+        long now=System.nanoTime();
+        if(!position.equals(aecraftroute$lastPosition)) { aecraftroute$lastPosition=position; aecraftroute$stallSince=now; return; }
+        if(now-aecraftroute$stallSince<30_000_000_000L || now-aecraftroute$lastStallLog<30_000_000_000L) return;
+        aecraftroute$lastStallLog=now;
+        com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                "[AE-Craftroute] certified job stalled 30s: position={} remaining={} active={} suspended={} canceled={} waitingFor={} inventory={}",
+                position, aecraftroute$production.remainingCounts(), cluster.isActive(), access.aecraftroute$getSuspended(),
+                access.aecraftroute$getLink().isCanceled(),
+                com.aecraftroute.addon.telemetry.CraftingInventorySummary.of(access.aecraftroute$getWaitingFor().list),
+                com.aecraftroute.addon.telemetry.CraftingInventorySummary.of(inventory.list));
+    }
 
     @Inject(method="trySubmitJob",at=@At("RETURN"))
     private void aecraftroute$attach(IGrid grid,ICraftingPlan plan,IActionSource source,ICraftingRequester requester,
             CallbackInfoReturnable<ICraftingSubmitResult> cir) {
         if(cir.getReturnValue().successful()) {
             aecraftroute$deliveryLogs.reset();
+            aecraftroute$dispatchLogs.reset();
+            aecraftroute$lastPosition=null; aecraftroute$stallSince=System.nanoTime(); aecraftroute$lastStallLog=0;
             if(plan instanceof CertifiedCraftingPlan certified){
                 aecraftroute$production=new ProductionJob(certified);
                 com.aecraftroute.addon.api.DispatchTrace.certified("ae2");
@@ -51,15 +81,24 @@ public abstract class ProductionCpuMixin {
     @WrapOperation(method="executeCrafting",at=@At(value="INVOKE",target="Lappeng/crafting/execution/CraftingCpuHelper;extractPatternInputs(Lappeng/api/crafting/IPatternDetails;Lappeng/crafting/inv/ICraftingInventory;Lnet/minecraft/world/level/Level;Lappeng/api/stacks/KeyCounter;Lappeng/api/stacks/KeyCounter;)[Lappeng/api/stacks/KeyCounter;"))
     private KeyCounter[] aecraftroute$orderedInputs(IPatternDetails pattern,ICraftingInventory inv,Level level,
             KeyCounter expected,KeyCounter containers,Operation<KeyCounter[]> original) {
-        return aecraftroute$production==null?original.call(pattern,inv,level,expected,containers)
-                :aecraftroute$production.extract(pattern,inv,level,expected,containers);
+        if(aecraftroute$production==null) return original.call(pattern,inv,level,expected,containers);
+        var extracted=aecraftroute$production.extract(pattern,inv,level,expected,containers);
+        if(extracted==null && aecraftroute$production.allows(pattern) && aecraftroute$dispatchLogs.acquireDelayed("inputs"))
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                    "[AE-Craftroute] certified dispatch waiting: current step inputs unavailable or invalid; inventory={}",
+                    com.aecraftroute.addon.telemetry.CraftingInventorySummary.of(inventory.list));
+        return extracted;
     }
 
     @WrapOperation(method="executeCrafting",at=@At(value="INVOKE",target="Lappeng/api/networking/crafting/ICraftingProvider;pushPattern(Lappeng/api/crafting/IPatternDetails;[Lappeng/api/stacks/KeyCounter;)Z"))
     private boolean aecraftroute$accepted(ICraftingProvider provider,IPatternDetails pattern,KeyCounter[] inputs,Operation<Boolean> original) {
         if(aecraftroute$production!=null && !aecraftroute$production.allows(pattern)) return false;
         boolean accepted=original.call(provider,pattern,inputs);
-        if(accepted && aecraftroute$production!=null) { aecraftroute$production.accepted(pattern); cluster.markDirty(); }
+        if(accepted && aecraftroute$production!=null) { aecraftroute$production.accepted(pattern); aecraftroute$dispatchLogs.reset(); cluster.markDirty(); }
+        else if(!accepted && aecraftroute$production!=null && aecraftroute$dispatchLogs.acquireDelayed("refused"))
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
+                    "[AE-Craftroute] certified dispatch refused by provider {} for the current step",
+                    provider.getClass().getName());
         return accepted;
     }
 
@@ -82,30 +121,42 @@ public abstract class ProductionCpuMixin {
 
     @Inject(method="tickCraftingLogic",at=@At("TAIL"))
     private void aecraftroute$deliver(IEnergyService energy,CraftingService service,CallbackInfo ci) {
+        if(aecraftroute$production!=null && aecraftroute$production.invalid()) {cancel();return;}
+        aecraftroute$watchStall();
         if(aecraftroute$production==null || job==null || !aecraftroute$production.done()) return;
         var access=(GrowthJobAccessor)(Object)job;
         if(access.aecraftroute$getLink().isCanceled() || access.aecraftroute$getSuspended() || !cluster.isActive()) return;
-        if(!access.aecraftroute$getWaitingFor().list.isEmpty()) {
-            if(aecraftroute$deliveryLogs.acquireDelayed("waiting"))
-                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery waiting for {} output keys from accepted dispatches",access.aecraftroute$getWaitingFor().list.size());
-            return;
-        }
         long remaining=access.aecraftroute$getRemainingAmount();
         AEKey key=access.aecraftroute$getFinalOutput().what();
-        long held=inventory.extract(key,remaining,Actionable.SIMULATE);
+        // Goal satisfaction is based on real stock after retaining startup capital,
+        // not on an estimated return ledger reaching zero. Late excess/byproducts
+        // follow native storage routing once the job finishes.
+        long held=aecraftroute$production.deliverableAmount(inventory.list,key,remaining);
         if(held<=0) {
             if(aecraftroute$deliveryLogs.acquire("missing"))
                 com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery pending: no {} x{} in the CPU inventory yet",key,remaining);
             return;
         }
-        long accepted=access.aecraftroute$getLink().insert(key,held,Actionable.MODULATE);
+        var link=access.aecraftroute$getLink();
+        long accepted=link.insert(key,held,Actionable.MODULATE);
+        boolean toNetwork=false;
+        // AE2 fixes this flag when constructing the link from a null requester.
+        // A linked requester may be temporarily unattached or refuse this tick;
+        // neither case permits redirecting its output into ME storage.
+        if(accepted<=0 && link.isStandalone()) {
+            // Player-initiated jobs carry no requester link (native AE2 only builds one for
+            // machines); native semantics then return the finished output to the network.
+            var grid=cluster.getGrid();
+            if(grid!=null) accepted=grid.getStorageService().getInventory().insert(key,held,Actionable.MODULATE,cluster.getSrc());
+            toNetwork=true;
+        }
         if(accepted<=0) {
             if(aecraftroute$deliveryLogs.acquire("blocked"))
-                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery blocked: requester accepted nothing, holding {} x{}",key,held);
+                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AE2 CPU delivery blocked; retained {} x{} for retry",key,held);
             return;
         }
         if(com.aecraftroute.addon.config.CraftRouteConfig.isDebugLogging())
-            com.aecraftroute.addon.CraftRouteAddon.LOGGER.info("[AE-Craftroute] AE2 CPU delivered {} x{} to the requester, remaining was {}",key,accepted,remaining);
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.info("[AE-Craftroute] AE2 CPU delivered {} x{} to {}, remaining was {}",key,accepted,toNetwork?"the network":"the requester",remaining);
         inventory.extract(key,accepted,Actionable.MODULATE);
         remaining-=accepted; access.aecraftroute$setRemainingAmount(remaining);
         postChange(key); cluster.markDirty();
@@ -119,14 +170,26 @@ public abstract class ProductionCpuMixin {
 
     @Inject(method="writeToNBT",at=@At("TAIL"))
     private void aecraftroute$save(CompoundTag tag,HolderLookup.Provider registries,CallbackInfo ci) {
-        if(aecraftroute$production!=null && job!=null) tag.put(ProductionJob.TAG,aecraftroute$production.save(registries));
-        else { tag.remove(ProductionJob.TAG); tag.remove(ProductionJob.LEGACY_TAG); }
+        if(aecraftroute$production!=null && job!=null) {
+            try {
+                tag.put(ProductionJob.TAG,aecraftroute$production.save(registries));
+                tag.remove(ProductionJob.SAVE_FAILED_TAG);
+            } catch(RuntimeException failure) {
+                tag.remove(ProductionJob.TAG); tag.remove(ProductionJob.LEGACY_TAG);
+                tag.putBoolean(ProductionJob.SAVE_FAILED_TAG,true);
+                com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Cannot persist certified CPU program; saved job will be canceled on reload",failure);
+            }
+        } else { tag.remove(ProductionJob.TAG); tag.remove(ProductionJob.LEGACY_TAG); tag.remove(ProductionJob.SAVE_FAILED_TAG); }
     }
     @Inject(method="readFromNBT",at=@At("TAIL"))
     private void aecraftroute$load(CompoundTag tag,HolderLookup.Provider registries,CallbackInfo ci) {
         aecraftroute$deliveryLogs.reset();
         var savedTag=ProductionJob.savedTag(tag);
         boolean saved=savedTag!=null;
+        if(job!=null && tag.getBoolean(ProductionJob.SAVE_FAILED_TAG)) {
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Certified CPU program failed to save; canceling restored job");
+            cancel(); return;
+        }
         aecraftroute$production=job!=null && savedTag!=null
                 ?ProductionJob.load(savedTag,registries,cluster.getLevel()):null;
         if(aecraftroute$production!=null) {
@@ -136,6 +199,7 @@ public abstract class ProductionCpuMixin {
             boolean valid=aecraftroute$production.validateRemainingTasks(remaining);
             com.aecraftroute.addon.CraftRouteAddon.LOGGER.info("[AE-Craftroute] restored production program: saved={} restored=true tasks={} valid={}",
                     saved,remaining.size(),valid);
+            if(!valid) cancel();
         } else {
             com.aecraftroute.addon.CraftRouteAddon.LOGGER.info("[AE-Craftroute] no production program restored: saved={} job={}",
                     saved,job!=null);

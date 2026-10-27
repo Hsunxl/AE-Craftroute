@@ -53,6 +53,17 @@ class ScaledPatternCompatibilityTest {
         assertEquals(Set.of("id"),tag.getAllKeys());
         assertSame(original,ScaledPatternCompat.decode(tag,t->original,null));
     }
+    @Test void strictWrapperMetadataMustNotInventMissingFlagsOrMultiplier() {
+        var tag=ScaledPatternCompat.encode(new ScaledBenchPatternDetails(base(),1),this::leaf);
+        var layer=tag.getList("aecraftrouteScaledWrappers",Tag.TAG_COMPOUND).getCompound(0);
+        layer.putString("class","com.extendedae_plus.util.crafting.StrictMolecularAssemblerPattern");
+        layer.putBoolean("strict",true);
+        assertThrows(IllegalArgumentException.class,()->ScaledPatternCompat.decode(tag,t->base(),null));
+        layer.putBoolean("allowScaling",true);
+        assertThrows(IllegalArgumentException.class,()->ScaledPatternCompat.decode(tag,t->base(),null));
+        layer.putInt("multiplierLimit",17);layer.putLong("operations",2);
+        assertThrows(IllegalArgumentException.class,()->ScaledPatternCompat.decode(tag,t->base(),null));
+    }
     @Test void corruptedMultiplierMissingWrapperOrChangedOutputFailClosed() {
         var scaled = new ScaledBenchPatternDetails(base(),4);
         var tag = ScaledPatternCompat.encode(scaled,this::leaf);
@@ -74,15 +85,72 @@ class ScaledPatternCompatibilityTest {
         var overflow=new ScaledContractPattern(new ScaledContractPattern(base(),Long.MAX_VALUE),2);
         assertThrows(ArithmeticException.class,()->ScaledPatternCompat.encode(overflow,this::leaf));
     }
-    @Test void levelAwareConstructorIsPreferredAndStoredOverflowFailsBeforeInstantiation() {
+    @Test void absentLevelUsesTwoArgumentConstructorAndStoredOverflowFailsBeforeInstantiation() {
         var pattern = new ScaledLevelPattern(base(),3);
         var encoded = ScaledPatternCompat.encode(pattern,this::leaf);
         var restored = (ScaledLevelPattern)ScaledPatternCompat.decode(encoded,t->base(),null);
-        assertTrue(restored.levelAware,"Even a null-level offline test must choose the Level overload");
+        assertFalse(restored.levelAware,"No null Level may enter the level-aware constructor");
+        var onlyLevel = ScaledPatternCompat.encode(new ScaledOnlyLevelPattern(base(),3,null),this::leaf);
+        assertThrows(IllegalArgumentException.class,()->ScaledPatternCompat.decode(onlyLevel,t->base(),null));
         var nested = ScaledPatternCompat.encode(new ScaledBenchPatternDetails(new ScaledBenchPatternDetails(base(),2),3),this::leaf);
         var layers = nested.getList("aecraftrouteScaledWrappers",Tag.TAG_COMPOUND);
         layers.getCompound(0).putLong("operations",Long.MAX_VALUE);
         assertThrows(ArithmeticException.class,()->ScaledPatternCompat.decode(nested,t->base(),null));
+    }
+    @Test void integralNumberGetterDoesNotBreakAnAddonsOwnScaledPattern() {
+        var tag=ScaledPatternCompat.encode(new ScaledIntPattern(base(),3),this::leaf);
+        var layers=tag.getList("aecraftrouteScaledWrappers",Tag.TAG_COMPOUND);
+        assertEquals(3L,layers.getCompound(0).getLong("operations"));
+        assertInstanceOf(ScaledIntPattern.class,ScaledPatternCompat.decode(tag,t->base(),null));
+    }
+    @Test void publicMultiplierGetterRoundTrips() {
+        IPatternDetails wrapper=new ScaledGetterPattern(base(),3);
+        var tag=ScaledPatternCompat.encode(wrapper,this::leaf);
+        assertEquals(3L,tag.getList("aecraftrouteScaledWrappers",Tag.TAG_COMPOUND)
+                .getCompound(0).getLong("operations"));
+        assertEquals(wrapper.getClass(),ScaledPatternCompat.decode(tag,t->base(),null).getClass());
+    }
+    @Test void unrelatedPrivateFieldDoesNotOptAnAddonIntoScaledExecution() {
+        assertThrows(IllegalArgumentException.class,()->ScaledPatternCompat.encode(
+                new ScaledInheritedFieldPattern(base(),4),this::leaf));
+    }
+    @Test void installedExtendedAePlusProcessingWrapperRoundTrips() throws Exception {
+        var type=Class.forName("com.extendedae_plus.api.crafting.ScaledProcessingPattern");
+        var wrapper=(IPatternDetails)type.getConstructor(IPatternDetails.class,long.class)
+                .newInstance(base(),3L);
+        var tag=ScaledPatternCompat.encode(wrapper,this::leaf);
+        assertEquals(3L,tag.getList("aecraftrouteScaledWrappers",Tag.TAG_COMPOUND)
+                .getCompound(0).getLong("operations"));
+        assertEquals(type,ScaledPatternCompat.decode(tag,t->base(),null).getClass());
+    }
+    @Test void installedExtendedAePlusMolecularWrapperRoundTrips() throws Exception {
+        var contract=appeng.blockentity.crafting.IMolecularAssemblerSupportedPattern.class;
+        var original=(IPatternDetails)java.lang.reflect.Proxy.newProxyInstance(
+                contract.getClassLoader(),new Class<?>[]{contract},(proxy,method,args)->{
+                    if(method.getName().equals("hashCode"))return System.identityHashCode(proxy);
+                    if(method.getName().equals("equals"))return proxy==args[0];
+                    return null;
+                });
+        var type=Class.forName("com.extendedae_plus.api.crafting.ScaledMolecularAssemblerPattern");
+        var wrapper=(IPatternDetails)type.getConstructor(contract,long.class).newInstance(original,5L);
+        var tag=ScaledPatternCompat.encode(wrapper,p->{assertSame(original,p);return new CompoundTag();});
+        assertEquals(5L,tag.getList("aecraftrouteScaledWrappers",Tag.TAG_COMPOUND)
+                .getCompound(0).getLong("operations"));
+        var restored=ScaledPatternCompat.decode(tag,t->original,null);
+        assertEquals(type,restored.getClass());
+        assertSame(original,type.getMethod("getOriginal").invoke(restored));
+    }
+    @Test void missingOptionalDependencyDuringWrapperRestoreFailsClosed() {
+        var tag=ScaledPatternCompat.encode(new ScaledLinkagePattern(base(),2,true),this::leaf);
+        var failure=assertThrows(IllegalArgumentException.class,()->ScaledPatternCompat.decode(tag,t->base(),null));
+        assertInstanceOf(NoClassDefFoundError.class,failure.getCause());
+        var saved=new ProductionJob(plan(new ScaledBenchPatternDetails(base(),2),2)).save(this::leaf,this::stack);
+        var entry=saved.getList("blocks",Tag.TAG_COMPOUND).getCompound(0)
+                .getList("steps",Tag.TAG_COMPOUND).getCompound(0).getCompound("pattern");
+        entry.getList("aecraftrouteScaledWrappers",Tag.TAG_COMPOUND).getCompound(0)
+                .putString("class",ScaledLinkagePattern.class.getName());
+        var restored=ProductionJob.load(saved,t->base(),this::stack,this::stack);
+        assertTrue(restored.invalid());
     }
     /** Getter contract fixture only; malformed graphs must fail before any recipe access. */
     public static class ScaledContractPattern implements IPatternDetails {
@@ -98,5 +166,48 @@ class ScaledPatternCompatibilityTest {
         final boolean levelAware;
         public ScaledLevelPattern(IPatternDetails original,long count) { super(original,count); levelAware=false; }
         public ScaledLevelPattern(IPatternDetails original,long count,Level level) { super(original,count); levelAware=true; }
+    }
+    public static class ScaledOnlyLevelPattern extends ScaledContractPattern {
+        public ScaledOnlyLevelPattern(IPatternDetails original,long count,Level level) {super(original,count);}
+    }
+    public static class ScaledLinkagePattern extends ScaledContractPattern {
+        public ScaledLinkagePattern(IPatternDetails original,long count) {
+            super(original,count);
+            throw new NoClassDefFoundError("removed optional addon");
+        }
+        public ScaledLinkagePattern(IPatternDetails original,long count,boolean fixture) {super(original,count);}
+    }
+    public static class ScaledIntPattern implements IPatternDetails {
+        final IPatternDetails original; final int count;
+        public ScaledIntPattern(IPatternDetails original,long count) {this.original=original;this.count=Math.toIntExact(count);}
+        public IPatternDetails getOriginal() {return original;}
+        public int getOperationsPerPush() {return count;}
+        public AEItemKey getDefinition() {throw new AssertionError();}
+        public IInput[] getInputs() {return original.getInputs();}
+        public List<GenericStack> getOutputs() {return original.getOutputs();}
+    }
+    public static class ScaledGetterPattern implements IPatternDetails {
+        private final IPatternDetails original;
+        private final long count;
+        public ScaledGetterPattern(IPatternDetails original,long count) {this.original=original;this.count=count;}
+        public IPatternDetails getOriginal() {return original;}
+        public long getMultiplier() {return count;}
+        public AEItemKey getDefinition() {return original.getDefinition();}
+        public IInput[] getInputs() {return original.getInputs();}
+        public List<GenericStack> getOutputs() {return original.getOutputs();}
+    }
+    public static class ScaledFieldBasePattern implements IPatternDetails {
+        protected final long multiplier;
+        private final IPatternDetails original;
+        public ScaledFieldBasePattern(IPatternDetails original,long multiplier) {
+            this.original=original;this.multiplier=multiplier;
+        }
+        public IPatternDetails getOriginal() {return original;}
+        public AEItemKey getDefinition() {return original.getDefinition();}
+        public IInput[] getInputs() {return original.getInputs();}
+        public List<GenericStack> getOutputs() {return original.getOutputs();}
+    }
+    public static class ScaledInheritedFieldPattern extends ScaledFieldBasePattern {
+        public ScaledInheritedFieldPattern(IPatternDetails original,long multiplier) {super(original,multiplier);}
     }
 }

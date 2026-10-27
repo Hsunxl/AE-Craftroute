@@ -13,13 +13,22 @@ public record RouteLayout(int width,int height,int contentRight,int panelLeft,in
         boolean compact=height<380;
         int sidebar=Math.max(64,Math.min(112,width*16/100));
         int right=width-sidebar;
+        return inContent(width,height,right,compact);
+    }
+    public static RouteLayout inContent(int width,int height) {
+        if(width<=0 || height<=0)throw new IllegalArgumentException("窗口尺寸无效");
+        if(width<320)return new RouteLayout(width,height,width,8,width-8,width-16,
+                8,width-8,72,height-22,48,true,true);
+        return inContent(width,height,width,height<380);
+    }
+    private static RouteLayout inContent(int width,int height,int right,boolean compact) {
         int preferred=Math.max(right>=380?190:142,Math.min(250,right*32/100));
         int panel=Math.max(1,Math.min(preferred,right-120));
         int panelRight=right-8,panelLeft=panelRight-panel;
         return new RouteLayout(width,height,right,panelLeft,panelRight,panel,8,panelLeft-8,
                 compact?50:78,height-(compact?22:26),compact?26:52,compact,height<300);
     }
-    public boolean usable() {return width>=320 && height>=200;}
+    public boolean usable() {return width>=180 && height>=200;}
     public int cacheColumns() {return Math.max(1,(panelWidth-14)/18);}
     public int cacheRows() {return compact?1:(18+cacheColumns()-1)/cacheColumns();}
     public int cacheReservedHeight() {return collapseCache?20:18+cacheRows()*18+22;}

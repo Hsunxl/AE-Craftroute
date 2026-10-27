@@ -11,9 +11,27 @@ import java.util.List;
  */
 public final class RouteGraphMath {
     private RouteGraphMath() {}
+    /** Maximum number of child segments accepted by both the UI and server. */
+    public static final int MAX_PATH_DEPTH = 24;
+    private static final java.util.regex.Pattern VALID_PATH = java.util.regex.Pattern.compile(
+            "root(?:/[0-9]{1,3}){0," + MAX_PATH_DEPTH + "}");
+    private static final java.util.regex.Pattern EXTENDABLE_PATH = java.util.regex.Pattern.compile(
+            "root(?:/[0-9]{1,3}){0," + (MAX_PATH_DEPTH - 1) + "}");
+    public static boolean validPath(String path) {
+        return path != null && VALID_PATH.matcher(path).matches();
+    }
+    public static boolean canExtendPath(String path) {
+        return path!=null && EXTENDABLE_PATH.matcher(path).matches();
+    }
+    /** Defensive parent lookup for restored or foreign UI nodes. */
+    public static String parentPath(String path) {
+        if(path==null)return null;
+        int slash=path.lastIndexOf('/');
+        return slash<0?null:path.substring(0,slash);
+    }
     /** v3 path protocol shared by canvas expansion, ingredient drops and server proof. */
     public static String childPath(String parent,int inputGroup) {
-        if(parent==null || !parent.matches("root(?:/[0-9]{1,3}){0,23}") || inputGroup<0 || inputGroup>999)
+        if(!canExtendPath(parent) || inputGroup<0 || inputGroup>999)
             throw new IllegalArgumentException("Invalid canvas child path");
         return parent+"/"+inputGroup;
     }
@@ -76,6 +94,37 @@ public final class RouteGraphMath {
         if (output <= 0) throw new IllegalArgumentException("配方没有该材料的净产出");
         if (demand <= 0) return 1;
         return 1 + (demand - 1) / output;
+    }
+
+    /** Upper bound for a user-set or stepped demand; keeps inputNeed far from overflow. */
+    public static final long MAX_DEMAND = 1_000_000_000_000L;
+
+    /** Clamp a demand to the canvas range [1, MAX_DEMAND]. */
+    public static long clampDemand(long value) {
+        return Math.max(1L, Math.min(MAX_DEMAND, value));
+    }
+
+    /**
+     * One wheel/keyboard step. Moves by one whole pattern batch ({@code output} units) or by
+     * one unit when {@code fine} is set or the batch output is unknown (output &lt;= 0).
+     * Direction &gt; 0 increases; any other value decreases. Result is clamped.
+     */
+    public static long stepDemand(long current, long output, int direction, boolean fine) {
+        long step = (fine || output <= 0) ? 1L : output;
+        long base = clampDemand(current);
+        long next = direction > 0 ? safeAdd(base, step) : base - step;
+        return clampDemand(next);
+    }
+
+    /** A local user override replaces the derived demand; without one the derived value stands. */
+    public static long applyOverride(long derived, Long override) {
+        return override == null ? derived : clampDemand(override);
+    }
+
+    /** Parse a typed quantity: digits only, at most 15 of them. Returns null when invalid or empty. */
+    public static Long parseDemand(String text) {
+        if (text == null || !text.matches("[0-9]{1,15}")) return null;
+        return clampDemand(Long.parseLong(text));
     }
 
     /** Input amount for a number of executions. */

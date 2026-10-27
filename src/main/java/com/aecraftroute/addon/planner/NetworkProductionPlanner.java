@@ -6,8 +6,8 @@ import java.util.*;
 import java.util.function.Function;
 import static com.aecraftroute.addon.planner.ProductionPlanningException.Reason.*;
 
-/** Finite network snapshot -> exact transitions -> certified plan. No bytecode cache,
- * chosen-primary-only search, stock correction or native fallback participates. */
+/** Finite snapshot -> fresh exact variants -> cached numeric compilation -> certified
+ * plan. Compiled entries contain no live patterns; the executable binding is always fresh. */
 public final class NetworkProductionPlanner {
     private static final ProductionPlanCache<AEKey> CACHE = new ProductionPlanCache<>();
     public static CertifiedCraftingPlan plan(AEKey target,long increment,
@@ -83,6 +83,8 @@ public final class NetworkProductionPlanner {
         if(result.status()!=ProductionPlanner.Status.FEASIBLE) {
             if(incomplete) throw new ProductionPlanningException(UNSUPPORTED,"部分样板替代输入尚未穷尽；没有已验证方案，不代表缺料");
             if(result.status()==ProductionPlanner.Status.LIMIT) throw new ProductionPlanningException(LIMIT,"计算预算已用尽，尚未判定可行性；不是缺料，也未退回旧算法");
+            if(result.maximumAdditionalTarget()!=null) throw new ProductionPlanningException(UNREACHABLE,
+                    "资源总量不足：验证全部候选转换后，当前库存至多可净增 "+result.maximumAdditionalTarget()+" 个目标，请求为 "+increment+"；不是合成数量上限");
             throw new ProductionPlanningException(UNREACHABLE,"当前库存与已编码样板无法达到净增量目标（可能缺原料、启动材料或只有无效循环）");
         }
         var used=new KeyCounter(); result.used().forEach(used::add);
@@ -95,20 +97,24 @@ public final class NetworkProductionPlanner {
                 for(var step:block.word()) word.add(new ProductionPlanner.Step<>(recipes.get(step.recipe()).id(),step.count()));
                 program.add(new ProductionPlanner.Block<>(word,block.repetitions()));
             }
-            long bytes=Math.max(1,Math.multiplyExact(8L,Math.addExact(result.program().size(),counts.size()+used.size())));
+            // AE2 charges one crafting byte per pattern firing, not per input slot,
+            // program block, or distinct key. Match CraftingTreeProcess.addBytes(count).
+            long bytes=0;
             for(var entry:counts.entrySet()) {
                 // Check native task/tracker multiplication too; no long saturation.
                 for(var out:entry.getKey().getOutputs()) Math.multiplyExact(Math.multiplyExact(out.amount(),entry.getValue()),out.what().getAmountPerUnit());
-                bytes=Math.addExact(bytes,Math.multiplyExact(entry.getValue(),entry.getKey().getInputs().length+1L));
+                bytes=Math.addExact(bytes,entry.getValue());
             }
             remaining(started,limits);
-            return new CertifiedCraftingPlan(new GenericStack(target,increment),bytes,used,counts,program);
+            return new CertifiedCraftingPlan(new GenericStack(target,increment),Math.max(1,bytes),used,counts,program);
         } catch(ArithmeticException ex) { throw new ProductionPlanningException(LIMIT,"计划超过 AE2 的整数容量，未提交不完整任务"); }
     }
     static ProductionPlanCache.Stats cacheStats() { return CACHE.stats(); }
     /** Read-only telemetry, also used by development-only real-grid assertions. */
     public static long cacheHits() { return CACHE.stats().hits(); }
     static void clearCache() { CACHE.clear(); }
+    /** Server lifecycle boundary: cached numeric rules and proofs cannot outlive a server. */
+    public static void clearPlanningCaches(){CACHE.clear();CompiledProductionGraph.clear();}
     private static long remaining(long start,ProductionPlanner.Limits limits) {
         if(Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
         long elapsed=System.nanoTime()-start;

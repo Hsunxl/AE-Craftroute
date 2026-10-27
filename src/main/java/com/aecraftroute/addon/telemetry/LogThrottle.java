@@ -4,7 +4,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.LongSupplier;
 
-/** Per-owner, per-reason monotonic throttle. Not persisted; first event is visible. */
+/** Per-owner, per-reason monotonic throttle. Not persisted; first event is visible.
+ * Thread-confined to the owning server-side CPU tick; do not share across threads.
+ */
 public final class LogThrottle {
     private final Map<String, Long> last = new HashMap<>();
     private final long intervalNanos;

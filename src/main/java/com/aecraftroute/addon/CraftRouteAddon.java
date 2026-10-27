@@ -53,11 +53,8 @@ public class CraftRouteAddon {
                         com.aecraftroute.addon.route.RouteSessions.clear());
         
         
-        // 第三方（Thunderbolt-Core）引擎路由：通过 CraftingPlanningEngines.register(CraftRouteBatchCraftingPlanner, 900, false)
-        // 注册到 Thunderbolt 的多引擎体系中。如果 Thunderbolt 未安装则不注册，Mixin 直接接管；
-        // 如果 Thunderbolt 已安装但玩家未选中 aecraftroute 引擎，则我们的 CraftingServiceMixin 让出控制权，
-        // 由 Thunderbolt 的 CraftingCalculationMixin 路由到选中的引擎（包括原生 AE2）。
-        // 实际注册在 commonSetup.enqueueWork 中执行（与 Thunderbolt 同帧初始化）。
+        // 不向 Thunderbolt 的多引擎规划体系注册我们的 planner；第三方未注册的
+        // requester 保持自己的规划和执行链。下方只注册 batch 资格兼容规则。
 
         if (CraftRouteConfig.isDebugLogging()) {
             LOGGER.info("[AE-Craftroute] Certified production planner active; ordered CPU dispatch, feedback reuse and exact plan cache enabled");
@@ -92,14 +89,10 @@ public class CraftRouteAddon {
                 CraftRouteConfig.isProxyEnabled());
         }
 
-        // Thunderbolt 引擎注册：必须在 enqueueWork 中调用，与 ThunderboltCore.onCommonSetup 同期执行。
-        // ThunderboltCompat.registerIfPresent() 在构造函数中调用会因 mod 加载顺序问题导致
-        // CraftingPlanningEngines.register() 在 Thunderbolt 完成注册前去重导致后续节点 provider 看不到我们。
-        // 故改为在 commonSetup 的 enqueueWork 中统一注册（与 Thunderbolt 同帧）。
+        // 只注册 Thunderbolt batch 资格规则，不接管它的规划引擎。
         event.enqueueWork(() -> {
-            // com.aecraftroute.addon.compat.thunderbolt.ThunderboltCompat.registerIfPresent(); // (v1.13.16+ stubbed)
-            // AdvancedAE 兼容确认（只打印一次）：AdvancedAE 只接管 submitJob 的 CPU 分配层，
-            // 我们的 beginCraftingCalculation 规划层仍由 VM 计算 —— 安装 AdvancedAE 也走我们的计算逻辑。
+            com.aecraftroute.addon.compat.ThunderboltBatchCompat.registerIfPresent();
+            // 兼容确认仅描述已注册请求；未注册第三方 requester 保持自己的执行链。
             com.aecraftroute.addon.compat.advancedae.AdvancedAECompat.logCompatibilityIfPresent();
         });
 

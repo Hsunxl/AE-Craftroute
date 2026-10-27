@@ -5,6 +5,7 @@
     "compatibilityLevel": "JAVA_21",
     "mixins": [
         "CraftingServiceMixin",
+        "NeoEcoExternalCpuFastPathMixin",
         "GrowthJobAccessor",
         "GrowthTaskAccessor",
         "GrowthCpuMixin",
@@ -15,6 +16,7 @@
         "AdvancedGrowthTimeAccessor",
         "AdvancedGrowthCpuMixin",
         "AdvancedProductionCpuMixin",
+        "AdvancedCraftingClusterMixin",
         "RouteMenuAccessor",
         "CraftConfirmRouteAccessor"
     ],

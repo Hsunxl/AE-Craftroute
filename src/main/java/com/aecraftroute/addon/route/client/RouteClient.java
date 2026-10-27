@@ -20,6 +20,8 @@ import org.lwjgl.glfw.GLFW;
 public final class RouteClient {
     public static java.util.function.Supplier<RouteRecipeBrowser> recipeBrowser;
     private static final java.util.Map<Screen, Button> toolbarButtons = new java.util.WeakHashMap<>();
+    private static final java.util.Map<net.minecraft.client.gui.components.AbstractButton,Integer> shiftedTerminalButtons =
+            new java.util.WeakHashMap<>();
     public static AEKey selectedTreeKey;
     public static long selectedTreeAmount;
     public static String selectedTreePath = "";
@@ -56,23 +58,28 @@ public final class RouteClient {
         var mc=Minecraft.getInstance();
         if(draft==null && mc.player.containerMenu instanceof CraftConfirmMenu confirm) {
             if(confirm.getPlan()==null) {
-                mc.player.displayClientMessage(Component.literal("合成计划尚未计算完成，请稍候再打开画布"),true);return;
-            }
-            // Client whatToCraft/amount are not the synchronized plan. AE2CT carries its final output.
-            var output=RouteTreeSnapshot.output(confirm);
-            if(output!=null) {key=output.what();amount=output.amount();}
-            else if(key==null) {
-                key=((CraftConfirmRouteAccessor)confirm).aecraftroute$routeWhatToCraft();
-                amount=((CraftConfirmRouteAccessor)confirm).aecraftroute$routeAmount();
+                // Let the canvas wait for the server-authoritative target via begin retry.
+                key=null;amount=0;
+            } else {
+                // Client whatToCraft/amount are not the synchronized plan. AE2CT carries its final output.
+                var output=RouteTreeSnapshot.output(confirm);
+                if(output!=null) {key=output.what();amount=output.amount();}
+                else {
+                    if(key==null)key=((CraftConfirmRouteAccessor)confirm).aecraftroute$routeWhatToCraft();
+                    amount=((CraftConfirmRouteAccessor)confirm).aecraftroute$routeAmount();
+                }
             }
             source="合成确认";
         }
         var canvas=new RouteScreen(parent,key,draft,amount,source,path);
         var reference=new java.lang.ref.WeakReference<>(canvas);
-        RouteNetwork.clientHandler = response -> {
+        var previousHandler=RouteNetwork.clientHandler;
+        java.util.function.Consumer<RouteNetwork.Response> handler = response -> {
             var screen=reference.get();
             if(screen!=null)screen.accept(response);
         };
+        canvas.setClientHandlers(previousHandler,handler);
+        RouteNetwork.clientHandler=handler;
         Minecraft.getInstance().setScreen(canvas);
     }
 
@@ -102,8 +109,10 @@ public final class RouteClient {
         for (var child : event.getScreen().children()) {
             if (child instanceof net.minecraft.client.gui.components.AbstractButton button) {
                 String text = button.getMessage().getString();
-                if (text.contains("深色") || text.contains("暗色") || text.equalsIgnoreCase("Dark Mode")) {
+                if ((text.contains("深色") || text.contains("暗色") || text.equalsIgnoreCase("Dark Mode"))
+                        && !java.util.Objects.equals(shiftedTerminalButtons.get(button),button.getY())) {
                     button.setY(button.getY() - 22);
+                    shiftedTerminalButtons.put(button,button.getY());
                 }
             }
         }

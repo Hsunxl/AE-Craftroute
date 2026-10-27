@@ -5,12 +5,20 @@ import appeng.api.networking.IGrid;
 import appeng.api.networking.crafting.*;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.KeyCounter;
+import appeng.api.stacks.GenericStack;
+import appeng.api.crafting.IPatternDetails;
+import appeng.api.networking.energy.IEnergyService;
+import appeng.me.service.CraftingService;
 import appeng.crafting.inv.ListCraftingInventory;
 import com.aecraftroute.addon.vm.FeedbackReservation;
+import com.aecraftroute.addon.vm.DeferredFeedbackReservation;
+import com.aecraftroute.addon.vm.LegacyFeedbackSave;
 import com.aecraftroute.addon.vm.NetProduction;
 import com.aecraftroute.addon.vm.TwoNodeGrowthPlanner;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.pedroksl.advanced_ae.common.cluster.AdvCraftingCPU;
@@ -30,16 +38,24 @@ public abstract class AdvancedGrowthCpuMixin {
     @Shadow private ExecutingCraftingJob job;
     @Shadow @Final private ListCraftingInventory inventory;
     @Shadow @Final private AdvCraftingCPU cpu;
+    @Shadow private void finishJob(boolean success){throw new AssertionError();}
+    @Shadow public void cancel(){throw new AssertionError();}
+    @Shadow private void postChange(AEKey key){throw new AssertionError();}
     @Unique private boolean aecraftroute$growthFeedback;
     @Unique private long aecraftroute$restoreTargetSeed;
+    @Unique private DeferredFeedbackReservation aecraftroute$deferredFeedback;
 
     @Inject(method="trySubmitJob", at=@At("RETURN"))
     private void aecraftroute$mark(IGrid grid, ICraftingPlan plan, IActionSource source,
             ICraftingRequester requester, CallbackInfoReturnable<ICraftingSubmitResult> cir) {
         if (job != null && cir.getReturnValue().successful()) {
-            aecraftroute$growthFeedback = !(plan instanceof com.aecraftroute.addon.planner.CertifiedCraftingPlan) && TwoNodeGrowthPlanner.containsRing(plan.patternTimes().keySet());
+            // Do not reshape a third-party requester's own execution contract.
+            aecraftroute$growthFeedback = !(plan instanceof com.aecraftroute.addon.planner.CertifiedCraftingPlan)
+                    && (requester == null || !com.aecraftroute.addon.api.CraftRouteCraftingRegistry.isUnregisteredThirdParty(requester.getClass().getName()))
+                    && TwoNodeGrowthPlanner.containsRing(plan.patternTimes().keySet());
             aecraftroute$restoreTargetSeed = aecraftroute$growthFeedback && NetProduction.sufficient(plan)
                     ? plan.usedItems().get(plan.finalOutput().what()) : 0;
+            aecraftroute$deferredFeedback=aecraftroute$growthFeedback?new DeferredFeedbackReservation():null;
             aecraftroute$orderFeedback();
         }
     }
@@ -57,12 +73,27 @@ public abstract class AdvancedGrowthCpuMixin {
             return original.call(what, amount, mode);
         AdvancedGrowthJobAccessor access = (AdvancedGrowthJobAccessor)(Object)job;
         if (!what.matches(access.aecraftroute$getFinalOutput())) return original.call(what, amount, mode);
+        if(aecraftroute$deferredFeedback!=null) {
+            long accepted=aecraftroute$deferredFeedback.offerBuffer(amount,
+                    access.aecraftroute$getWaitingFor().extract(what,Long.MAX_VALUE,Actionable.SIMULATE));
+            if(mode==Actionable.MODULATE && accepted>0) {
+                inventory.insert(what,accepted,Actionable.MODULATE);
+                aecraftroute$deferredFeedback.retain(accepted);cpu.markDirty();
+            }
+            return accepted;
+        }
         long pending = 0;
         try {
             for (var task : access.aecraftroute$getTasks().entrySet()) {
                 long times = ((AdvancedGrowthTaskAccessor)task.getValue()).aecraftroute$getValue();
                 if (times <= 0) continue;
-                for (var input : task.getKey().getInputs()) {
+                // A foreign pattern may expose no resolvable slots. That proves nothing
+                // about this key, so skip it: throwing here would escape our hook into the
+                // provider's insert, and saturating would reserve on unproven grounds.
+                var inputs = task.getKey().getInputs();
+                if (inputs == null) continue;
+                for (var input : inputs) {
+                    if (input == null) continue;
                     var choices = input.getPossibleInputs();
                     if (choices == null || choices.length == 0 || choices[0] == null
                             || !what.equals(choices[0].what())) continue;
@@ -93,29 +124,111 @@ public abstract class AdvancedGrowthCpuMixin {
         return retained + (amount > retained ? original.call(what, amount - retained, mode) : 0L);
     }
 
+ @WrapOperation(method="executeCrafting",at=@At(value="INVOKE",target="Lappeng/api/networking/crafting/ICraftingProvider;pushPattern(Lappeng/api/crafting/IPatternDetails;[Lappeng/api/stacks/KeyCounter;)Z"))
+ private boolean aecraftroute$settleFeedbackInput(ICraftingProvider provider,IPatternDetails pattern,
+         KeyCounter[] inputs,Operation<Boolean> original) {
+     var ledger=aecraftroute$deferredFeedback;var submittedJob=job;
+     if(ledger==null || submittedJob==null)return original.call(provider,pattern,inputs);
+     var access=(AdvancedGrowthJobAccessor)(Object)submittedJob;var key=access.aecraftroute$getFinalOutput().what();
+     long snapshot=DeferredFeedbackReservation.consumedInput(pattern,inputs,key);
+     boolean accepted=original.call(provider,pattern,inputs);
+     if(accepted && job==submittedJob && aecraftroute$deferredFeedback==ledger) {
+         long used=ledger.consumed(snapshot);
+         access.aecraftroute$getWaitingFor().extract(key,used,Actionable.MODULATE);
+         ((AdvancedGrowthTimeAccessor)(Object)access.aecraftroute$getTimeTracker()).aecraftroute$decrementItems(used,key.getType());
+         cpu.markDirty();
+     }
+     return accepted;
+ }
+ @Inject(method="tickCraftingLogic",at=@At("TAIL"))
+ private void aecraftroute$releaseFeedback(IEnergyService energy,CraftingService service,CallbackInfo ci) {
+     var ledger=aecraftroute$deferredFeedback;
+     if(ledger==null || job==null || !cpu.isActive())return;
+     var access=(AdvancedGrowthJobAccessor)(Object)job;
+     if(access.aecraftroute$getSuspended() || access.aecraftroute$getLink().isCanceled())return;
+     var key=access.aecraftroute$getFinalOutput().what();
+     long pending;
+     try {
+         // Unresolvable candidate slots are not a corrupt save: hold, never cancel.
+            pending=DeferredFeedbackReservation.pendingInputOrUnknown(access.aecraftroute$getTasks(),
+                 value->((AdvancedGrowthTaskAccessor)value).aecraftroute$getValue(),key,cpu.getLevel());
+         ledger.restore(ledger.held(),access.aecraftroute$getWaitingFor().extract(key,Long.MAX_VALUE,Actionable.SIMULATE),
+                 inventory.extract(key,Long.MAX_VALUE,Actionable.SIMULATE));
+     } catch(RuntimeException invalid) {
+         com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Invalid legacy feedback state; cancelling without synthetic output",invalid);
+         cancel();return;
+     }
+     long remaining=access.aecraftroute$getRemainingAmount();
+     var offer=ledger.offerRelease(pending,inventory.extract(key,Long.MAX_VALUE,Actionable.SIMULATE),
+             aecraftroute$restoreTargetSeed,remaining);
+     if(offer.seed()>0) {
+         ledger.settle(offer.seed());aecraftroute$restoreTargetSeed-=offer.seed();
+         access.aecraftroute$getWaitingFor().extract(key,offer.seed(),Actionable.MODULATE);
+         ((AdvancedGrowthTimeAccessor)(Object)access.aecraftroute$getTimeTracker()).aecraftroute$decrementItems(offer.seed(),key.getType());
+         cpu.markDirty();
+     }
+     if(offer.directLimit()<=0)return;
+     var link=access.aecraftroute$getLink();
+     long accepted=link.insert(key,offer.directLimit(),Actionable.MODULATE);
+     if(accepted<=0 && link.isStandalone() && cpu.getGrid()!=null)
+         accepted=cpu.getGrid().getStorageService().getInventory().insert(key,offer.directLimit(),Actionable.MODULATE,cpu.getSrc());
+     if(accepted<=0)return;
+     if(accepted>offer.directLimit())throw new IllegalStateException("Requester over-accepted deferred feedback");
+     inventory.extract(key,accepted,Actionable.MODULATE);ledger.settle(accepted);
+     access.aecraftroute$getWaitingFor().extract(key,accepted,Actionable.MODULATE);
+     ((AdvancedGrowthTimeAccessor)(Object)access.aecraftroute$getTimeTracker()).aecraftroute$decrementItems(accepted,key.getType());
+     remaining-=accepted;access.aecraftroute$setRemainingAmount(remaining);postChange(key);cpu.markDirty();
+     if(remaining==0){finishJob(true);cpu.updateOutput(null);}
+     else cpu.updateOutput(new GenericStack(key,remaining));
+ }
+ @Inject(method="finishJob",at=@At("TAIL"))
+ private void aecraftroute$clearDeferred(boolean success,CallbackInfo ci) {
+     aecraftroute$deferredFeedback=null;
+ }
+
     @Inject(method="writeToNBT", at=@At("TAIL"))
     private void aecraftroute$save(CompoundTag tag, HolderLookup.Provider registries, CallbackInfo ci) {
         tag.putBoolean("aecraftrouteGrowthFeedback", aecraftroute$growthFeedback && job != null);
         tag.putLong("aecraftrouteRestoreTargetSeed", aecraftroute$restoreTargetSeed);
+        tag.putBoolean("aecraftrouteDeferredFeedback",job!=null && aecraftroute$deferredFeedback!=null);
+        tag.putLong("aecraftrouteDeferredHeld",aecraftroute$deferredFeedback==null?0:aecraftroute$deferredFeedback.held());
     }
 
     @Inject(method="readFromNBT", at=@At("TAIL"))
     private void aecraftroute$load(CompoundTag tag, HolderLookup.Provider registries, CallbackInfo ci) {
-        // Missing marker means a pre-patch job: don't guess seed-restoration debt
-        // or mutate its inventory. Cancel/resubmit it after installing the fix.
-        aecraftroute$growthFeedback = job != null && feedbackFlag(tag);
-        aecraftroute$restoreTargetSeed = aecraftroute$growthFeedback
-                ? Math.max(0, restoreSeed(tag)) : 0;
+        // Missing deferred marker is the intentionally supported pre-deferred protocol.
+        // The strict parser rejects malformed present markers before changing CPU state.
+        LegacyFeedbackSave.State saved;
+        try {saved=LegacyFeedbackSave.read(tag);}
+        catch(RuntimeException invalid) {
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Invalid saved AdvancedAE feedback metadata; cancelling",invalid);
+            cancel();return;
+        }
+        aecraftroute$growthFeedback = job != null && saved.enabled();
+        aecraftroute$restoreTargetSeed = aecraftroute$growthFeedback ? saved.restoreSeed() : 0;
+        aecraftroute$deferredFeedback=null;
+        if(aecraftroute$growthFeedback && saved.deferred()) {
+            var access=(AdvancedGrowthJobAccessor)(Object)job;var key=access.aecraftroute$getFinalOutput().what();
+            try {
+                // A job whose own counts cannot drain would pin held credit forever.
+                DeferredFeedbackReservation.requireSaneRuns(access.aecraftroute$getTasks(),
+                        value->((AdvancedGrowthTaskAccessor)value).aecraftroute$getValue());
+                var ledger=new DeferredFeedbackReservation();
+                ledger.restore(saved.held(),
+                        access.aecraftroute$getWaitingFor().extract(key,Long.MAX_VALUE,Actionable.SIMULATE),
+                        inventory.extract(key,Long.MAX_VALUE,Actionable.SIMULATE));
+                aecraftroute$deferredFeedback=ledger;
+            } catch(RuntimeException invalid) {
+                com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Invalid saved AdvancedAE deferred feedback; cancelling",invalid);
+                cancel();return;
+            }
+        }
+        // Native readFromNBT drops a job whose final output is unreadable. Stock is
+        // refunded by finishJob, but the held credit disappears; never do that silently.
+        if(saved.deferred() && job==null)
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Saved deferred feedback discarded: native AdvancedAE CPU job did not load (held={})",saved.held());
         aecraftroute$orderFeedback();
     }
 
-    /** Feedback flags predate the rename; a saved CPU keeps its old key. */
-    private static boolean feedbackFlag(net.minecraft.nbt.CompoundTag tag) {
-        return tag.contains("aecraftrouteGrowthFeedback")?tag.getBoolean("aecraftrouteGrowthFeedback")
-                :tag.getBoolean("ae2vmGrowthFeedback");
-    }
-    private static long restoreSeed(net.minecraft.nbt.CompoundTag tag) {
-        if(tag.contains("aecraftrouteRestoreTargetSeed"))return tag.getLong("aecraftrouteRestoreTargetSeed");
-        return tag.contains("ae2vmRestoreTargetSeed")?tag.getLong("ae2vmRestoreTargetSeed"):0;
-    }
+    /** Feedback metadata is decoded by LegacyFeedbackSave before any CPU state is changed. */
 }
