@@ -42,7 +42,18 @@ public final class RouteWorkbench {
             if(view==null)view=ViewRequest.first();
         }
     }
-    public record CacheSlot(int slot,String token,RouteView.Stack icon,String output,RouteView.Stack product) {}
+    public record Discard(int cacheSlot,long revision,ViewRequest view) {
+        public Discard {
+            if(cacheSlot<0 || cacheSlot>=CACHE_SIZE || revision<0)
+                throw new IllegalArgumentException("缓存清理参数无效");
+            if(view==null)view=ViewRequest.first();
+        }
+    }
+    public record CacheSlot(int slot,String token,RouteView.Stack icon,String output,RouteView.Stack product,boolean corrupt) {
+        public CacheSlot(int slot,String token,RouteView.Stack icon,String output,RouteView.Stack product) {
+            this(slot,token,icon,output,product,false);
+        }
+    }
     public record ProviderSlot(int slot,RouteView.Stack icon,String output,RouteView.Stack product) {}
     public record Provider(String id,String name,RouteView.Stack icon,int totalSlots,int slotStart,List<ProviderSlot> slots,int occupiedSlots) {}
     public record State(boolean workbench,String message,long revision,List<CacheSlot> cache,List<Provider> providers,
@@ -82,9 +93,11 @@ public final class RouteWorkbench {
     /** Only a reference from this player's last view can authorize moving this exact cached item. */
     private static CompoundTag validateCacheSlot(CompoundTag cache,int slot,String token) {return RouteCacheData.entry(cache,slot,token);}
     public static String takeToBackpack(ServerPlayer player,AEBaseMenu menu) {
-        int moved=0;var cache=cache(player);
+        int moved=0,corrupt=0;var cache=cache(player);
         for(int i=0;i<CACHE_SIZE;i++)if(cache.contains(Integer.toString(i))) {
-            var item=stack(player,cache.getCompound(Integer.toString(i)));
+            ItemStack item;
+            try {item=stack(player,cache.getCompound(Integer.toString(i)));}
+            catch(RuntimeException invalid) {corrupt++;continue;}
             boolean room=false;
             for(int j=0;j<36;j++) {
                 var existing=player.getInventory().getItem(j);
@@ -99,7 +112,18 @@ public final class RouteWorkbench {
             else if(remaining.getCount()!=item.getCount())throw new IllegalStateException("样板缓存必须每槽一张");
         }
         player.getInventory().setChanged();menu.broadcastChanges();
-        return "已放入背包 "+moved+" 张样板；放不下的仍留在缓存";
+        return "已放入背包 "+moved+" 张样板；放不下的仍留在缓存"
+                +(corrupt==0?"":"；"+corrupt+" 个损坏槽已保留，右键两次可清理");
+    }
+    /** Explicitly discard one unreadable slot; healthy encoded patterns are never deleted here. */
+    public static String discardCorrupt(ServerPlayer player,Discard discard) {
+        var cache=cache(player);
+        RouteCacheData.discardUnreadable(cache,discard.cacheSlot(),discard.revision(),entry->{
+            try {icon(player,stack(player,entry));return true;}
+            catch(RuntimeException invalid) {return false;}
+        });
+        commit(player,cache);
+        return "已清理无法读取的缓存槽 "+(discard.cacheSlot()+1);
     }
     private static List<PatternContainer> activeProviders(IGrid grid) {return RouteProviders.active(grid);}
     public static String upload(ServerPlayer player,AEBaseMenu menu,IGrid grid,Upload upload) {
@@ -154,7 +178,10 @@ public final class RouteWorkbench {
         var filtered=RouteProviderFilter.select(providers,RouteWorkbench::metadata,request.query(),queryChanged?0:request.providerPage(),PROVIDERS_PER_PAGE);
         int pages=filtered.pages(),page=filtered.page();var shown=filtered.items();
         int requestedSlotPage=queryChanged?0:request.slotPage();
-        int slotPages=shown.isEmpty()?0:RouteProviderWindow.of(shown.get(0).getTerminalPatternInventory().size(),request.columns(),request.rows(),requestedSlotPage).pages();
+        int columns=request.columns(),visibleRows=request.rows();
+        int slotPages=shown.stream().mapToInt(provider->RouteProviderWindow.of(
+                provider.getTerminalPatternInventory().size(),columns,visibleRows,requestedSlotPage).pages())
+                .max().orElse(0);
         int slotPage=slotPages==0?0:Math.min(requestedSlotPage,slotPages-1);
         var rows=new ArrayList<Provider>();
         for(var provider:shown) {
@@ -171,8 +198,13 @@ public final class RouteWorkbench {
         }
         var cache=cache(player);var cached=new ArrayList<CacheSlot>();
         for(int i=0;i<CACHE_SIZE;i++)if(cache.contains(Integer.toString(i))) {
-            var entry=cache.getCompound(Integer.toString(i));var item=stack(player,entry);
-            cached.add(new CacheSlot(i,entry.getString("token"),icon(player,item),output(player,item),product(player,item)));
+            var entry=cache.getCompound(Integer.toString(i));
+            try {
+                var item=stack(player,entry);
+                cached.add(new CacheSlot(i,entry.getString("token"),icon(player,item),output(player,item),product(player,item)));
+            } catch(RuntimeException invalid) {
+                cached.add(new CacheSlot(i,entry.getString("token"),null,"损坏样板（无法读取）",null,true));
+            }
         }
         return new State(true,message,cache.getLong("revision"),List.copyOf(cached),List.copyOf(rows),page,pages,filtered.total(),slotPage,slotPages,request.query());
     }

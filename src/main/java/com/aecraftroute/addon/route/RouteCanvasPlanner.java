@@ -13,19 +13,28 @@ public final class RouteCanvasPlanner {
         if(!Objects.equals(canvas.target(),target) || canvas.amount()!=amount)
             throw new ProductionPlanningException(INVALID,"强制画布只适用于应用时的目标与数量；请重新应用画布");
         long deadline=System.nanoTime()+limits.nanos();
+        check(deadline);
         var all=new LinkedHashSet<IPatternDetails>();
         for(var list:snapshot.patterns().values()) for(var p:list) {
+            check(deadline);
             try {com.aecraftroute.addon.compat.ScaledPatternCompat.validate(p);}
             catch(IllegalArgumentException invalid) {throw new ProductionPlanningException(UNSUPPORTED,"样板包装无法安全解析："+invalid.getMessage());}
             all.add(p);
+            check(deadline);
         }
         var byIdentity=snapshot.identities();
         var selected=new LinkedHashMap<String,IPatternDetails>();
         var paths=new LinkedHashMap<String,RoutePolicy.Path<AEKey>>();
         for(var path:canvas.paths()) {
-            if(path.path()==null || paths.putIfAbsent(path.path(),path)!=null) throw new ProductionPlanningException(INVALID,"画布路径重复或缺失");
-            var match=snapshot.patterns().getOrDefault(path.key(),List.of()).stream()
-                    .filter(p->path.choiceId().equals(byIdentity.get(p))).findFirst().orElseThrow(()->new ProductionPlanningException(INVALID,"路径 "+path.path()+" 的样板已失效或被规则禁止"));
+            check(deadline);
+            if(!RouteGraphMath.validPath(path.path()) || paths.putIfAbsent(path.path(),path)!=null) throw new ProductionPlanningException(INVALID,"画布路径无效或重复");
+            IPatternDetails match=null;
+            for(var candidate:snapshot.patterns().getOrDefault(path.key(),List.of())) {
+                check(deadline);
+                if(path.choiceId().equals(byIdentity.get(candidate))){match=candidate;break;}
+            }
+            check(deadline);
+            if(match==null)throw new ProductionPlanningException(INVALID,"路径 "+path.path()+" 的样板已失效或被规则禁止");
             selected.put(path.path(),match);
         }
         var root=paths.get("root");
@@ -42,6 +51,10 @@ public final class RouteCanvasPlanner {
             if(output<=0) throw new ProductionPlanningException(INVALID,"路径样板不产出对应材料");
             long count=1+((demand-1)/output); runs.put(path.path(),count);
             var grouped=primaryInputs(pattern); int index=0;
+            // A valid terminal canvas occurrence may still consume ingredients.
+            // They remain in the authoritative recipe/proof; only impossible UI
+            // child addresses are omitted, not the physical input requirements.
+            if(!RouteGraphMath.canExtendPath(path.path()))continue;
             for(var input:grouped.entrySet()) {
                 // v3 protocol uses input group index, not client SNBT hash text.
                 String child=RouteGraphMath.childPath(path.path(),index++);
@@ -83,15 +96,23 @@ public final class RouteCanvasPlanner {
             throw failure;
         }
         check(deadline);
-        var used=new KeyCounter(); proof.used().forEach(used::add);
-        var counts=new LinkedHashMap<IPatternDetails,Long>();
-        proof.counts().forEach((p,n)->counts.merge(p.pattern(),n,Math::addExact));
-        long bytes=Math.max(1,Math.multiplyExact(8L,proof.program().size()+counts.size()+used.size()));
-        for(var e:counts.entrySet()) {
-            bytes=Math.addExact(bytes,Math.multiplyExact(e.getValue(),e.getKey().getInputs().length+1L));
-            for(var out:e.getKey().getOutputs()) Math.multiplyExact(Math.multiplyExact(out.amount(),e.getValue()),out.what().getAmountPerUnit());
+        try {
+            var used=new KeyCounter(); proof.used().forEach(used::add);
+            var counts=new LinkedHashMap<IPatternDetails,Long>();
+            proof.counts().forEach((p,n)->counts.merge(p.pattern(),n,Math::addExact));
+            // AE2's simulation charges one byte per physical pattern firing. Virtual
+            // branch markers and compact program blocks never execute on the CPU.
+            long bytes=0;
+            for(var e:counts.entrySet()) {
+                bytes=Math.addExact(bytes,e.getValue());
+                // This value is not CPU byte cost. Check that the physical output
+                // quantity still fits AE2's long-sized stack accounting.
+                for(var out:e.getKey().getOutputs()) Math.multiplyExact(Math.multiplyExact(out.amount(),e.getValue()),out.what().getAmountPerUnit());
+            }
+            return new CertifiedCraftingPlan(new GenericStack(target,amount),Math.max(1,bytes),used,counts,proof.program());
+        } catch(ArithmeticException overflow) {
+            throw new ProductionPlanningException(LIMIT,"强制画布的 CPU 任务数量超过整数容量；未提交部分程序");
         }
-        return new CertifiedCraftingPlan(new GenericStack(target,amount),bytes,used,counts,proof.program());
     }
     static LinkedHashMap<AEKey,Long> primaryInputs(IPatternDetails p) {
         var inputs=new LinkedHashMap<AEKey,Long>();

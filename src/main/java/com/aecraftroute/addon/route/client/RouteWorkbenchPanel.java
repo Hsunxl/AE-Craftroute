@@ -16,9 +16,12 @@ final class RouteWorkbenchPanel {
     private final BiPredicate<String,String> send;
     private RouteWorkbench.State state;
     private RouteWorkbench.CacheSlot dragged;
+    private int armedDiscardSlot=-1;
+    private long armedDiscardRevision;
+    private long armedDiscardAt;
     private boolean open,compact,collapseCache,cacheExpanded;
     private int cachePage,cacheRows,expandedY;
-    private int x,y,w,bottom,drawerX,drawerY,drawerW,columns=8,inventoryRows=1;
+    private int x,w,bottom,drawerX,drawerY,drawerW,columns=8,inventoryRows=1;
     private double dragX,dragY;
     private int mouseX,mouseY;
     private EditBox providerSearch;
@@ -38,7 +41,6 @@ final class RouteWorkbenchPanel {
         int cacheColumns=Math.max(1,w/18);
         cacheRows=compact?1:(RouteWorkbench.CACHE_SIZE+cacheColumns-1)/cacheColumns;
         expandedY=bottom-(18+cacheRows*18+22);
-        y=collapseCache && !cacheExpanded?bottom-20:expandedY;
         drawerW=Math.min(320,canvasWidth-8);drawerX=canvasLeft+canvasWidth-drawerW-4;
         // Reserve the search header, at least one real slot row, and both footer lines.
         drawerY=Math.max(4,Math.min(Math.max(canvasTop+18,bottom-230),bottom-136));
@@ -52,7 +54,9 @@ final class RouteWorkbenchPanel {
             providerSearch.setFocused(false);
         } else providerSearch.setRectangle(Math.max(24,drawerW-54),18,drawerX+6,drawerY+25);
     }
-    int top() {return collapseCache?bottom-20:y;}
+    /** Panel top edge. Derived from the collapse state so drawing, hit testing and the
+     *  inspector's reserved bottom can never disagree with the last rendered position. */
+    int top() {return collapseCache && !cacheExpanded?bottom-20:expandedY;}
     int dropBottom() {return open?drawerY:bottom;}
     boolean open() {return open;}
     private String query() {return RouteProviderFilter.boundedQuery(providerSearch==null?"":providerSearch.getValue());}
@@ -88,9 +92,14 @@ final class RouteWorkbenchPanel {
         if(keyCode==GLFW.GLFW_KEY_ENTER || keyCode==GLFW.GLFW_KEY_KP_ENTER) {submitSearch();return true;}
         providerSearch.keyPressed(keyCode,scanCode,modifiers);return true;
     }
-    void accept(RouteWorkbench.State state) {this.state=state;}
+    void accept(RouteWorkbench.State state) {
+        this.state=state;
+        if(armedDiscardSlot>=0 && (state.revision()!=armedDiscardRevision || state.cache().stream()
+                .noneMatch(slot->slot.slot()==armedDiscardSlot && slot.corrupt()))) armedDiscardSlot=-1;
+    }
     boolean contains(double mx,double my) {
-        return inside(mx,my,x-2,y-3,w+4,bottom-y+3) || open && inside(mx,my,drawerX,drawerY,drawerW,bottom-drawerY);
+        int top=top();
+        return inside(mx,my,x-2,top-3,w+4,bottom-top+3) || open && inside(mx,my,drawerX,drawerY,drawerW,bottom-drawerY);
     }
     private boolean inside(double mx,double my,int x,int y,int w,int h) {return mx>=x && mx<x+w && my>=y && my<y+h;}
     private void label(GuiGraphics g,String s,int x,int y,int max,int color) {
@@ -119,10 +128,11 @@ final class RouteWorkbenchPanel {
     void render(GuiGraphics g,int mx,int my) {
         mouseX=mx;mouseY=my;
         buttons.clear();cacheHits.clear();slotHits.clear();
+        int y=top();
         g.fill(x-2,y-3,x+w+2,bottom,0xFFCBCCD4);g.fill(x-2,y-3,x+w+2,y-2,0xFF373737);
         String title="样板缓存 "+(state==null?"…":state.cache().size()+"/"+RouteWorkbench.CACHE_SIZE);
         if(collapseCache)button(g,x,y,w-90,(cacheExpanded?"▴ ":"▾ ")+title,()->{
-            cacheExpanded=!cacheExpanded;y=cacheExpanded?expandedY:bottom-20;
+            cacheExpanded=!cacheExpanded;
         });
         else label(g,title,x,y+3,w-88,0xFF2D2F38);
         button(g,x+w-86,y,86,open?"收起供应器":"上传到供应器",()->{open=!open;if(open)refresh();else if(providerSearch!=null)providerSearch.setFocused(false);});
@@ -136,6 +146,7 @@ final class RouteWorkbenchPanel {
                 RouteWorkbench.CacheSlot entry=null;
                 if(state!=null)for(var candidate:state.cache())if(candidate.slot()==i) {entry=candidate;break;}
                 slot(g,sx,sy,entry==null || dragged!=null && dragged.slot()==i?null:preview(entry.icon(),entry.product()));
+                if(entry!=null && entry.corrupt())label(g,"!",sx+6,sy+5,12,0xFFAA3333);
                 if(entry!=null)cacheHits.add(new CacheHit(sx,sy,entry));
             }
             if(pages>1) {
@@ -146,7 +157,8 @@ final class RouteWorkbenchPanel {
         }
         if(open)renderProviders(g,mx,my);
         String tip=null;
-        for(var hit:cacheHits)if(inside(mx,my,hit.x,hit.y,18,18))tip="已编码样板："+hit.item.output()+"（拖入供应器空槽）";
+        for(var hit:cacheHits)if(inside(mx,my,hit.x,hit.y,18,18))
+            tip=hit.item.corrupt()?"样板无法读取；右键两次确认清理此槽的原始数据":"已编码样板："+hit.item.output()+"（拖入供应器空槽）";
         for(var hit:slotHits)if(inside(mx,my,hit.x,hit.y,18,18))tip="槽位 "+(hit.item.slot()+1)+" · "+hit.item.output();
         if(tip!=null && dragged==null)g.renderComponentTooltip(Minecraft.getInstance().font,List.of(Component.literal(tip)),mx,my);
     }
@@ -192,9 +204,21 @@ final class RouteWorkbenchPanel {
             providerSearch.setFocused(false);
         }
         if(!contains(mx,my))return false;
+        if(mouseButton==1)for(var hit:cacheHits)if(hit.item.corrupt() && inside(mx,my,hit.x,hit.y,18,18)) {
+            long now=System.nanoTime();
+            if(armedDiscardSlot==hit.item.slot() && state!=null && armedDiscardRevision==state.revision()
+                    && now-armedDiscardAt<5_000_000_000L) {
+                var discard=new RouteWorkbench.Discard(hit.item.slot(),state.revision(),view());
+                send.test("discardcache",RouteNetwork.GSON.toJson(discard));armedDiscardSlot=-1;
+            } else {armedDiscardSlot=hit.item.slot();armedDiscardRevision=state==null?0:state.revision();armedDiscardAt=now;}
+            return true;
+        }
         if(mouseButton==0) {
             for(var button:buttons)if(inside(mx,my,button.x,button.y,button.w,18)) {button.action.run();return true;}
-            for(var hit:cacheHits)if(inside(mx,my,hit.x,hit.y,18,18)) {dragged=hit.item;dragX=mx;dragY=my;return true;}
+            for(var hit:cacheHits)if(inside(mx,my,hit.x,hit.y,18,18)) {
+                if(!hit.item.corrupt()) {dragged=hit.item;dragX=mx;dragY=my;}
+                return true;
+            }
         }
         return true;
     }

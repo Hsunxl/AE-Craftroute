@@ -28,6 +28,17 @@ class NumericCraftingVMTest {
         return NumericCraftingVM.execute(p, 0, requested, stock, () -> false);
     }
 
+    @Test void zeroOutputLimitDoesNotDivideAndMissingHaltFailsWithProgramError() {
+        var zeroLimit=new CompiledNumericProgram(1,new byte[]{LIMIT_OUTPUT,RECORD_PATTERN,HALT},
+                new int[]{0,0,0, 0,0,0, 0,0,0},new int[]{0},new long[]{0});
+        var result=execute(zeroLimit,3,0);
+        assertEquals(EXECUTED,result.status());
+        assertEquals(3,result.step().count());
+        var missingHalt=new CompiledNumericProgram(1,new byte[]{RECORD_PATTERN},new int[]{0,0,0},new int[]{0},new long[0]);
+        var failure=assertThrows(IllegalStateException.class,()->execute(missingHalt,1,0));
+        assertTrue(failure.getMessage().contains("counter out of bounds"));
+    }
+
     @Test void compilerEmitsSparseInstructionsOperandsAndConstantPool() {
         var p = NumericProgramCompiler.compile(100,
                 new int[][]{{3}}, new long[][]{{2}}, new int[][]{{3, 89}}, new long[][]{{3, 5}}, () -> false);

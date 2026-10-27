@@ -14,23 +14,38 @@ public final class RouteTreeGeometry {
     }
     public static List<Box> constrain(List<Box> boxes) {
         var positions=new LinkedHashMap<String,Box>();boxes.forEach(box->positions.put(box.path(),box));
-        int maxDepth=boxes.stream().mapToInt(Box::depth).max().orElse(-1),previousBottom=Integer.MIN_VALUE;
-        for(int depth=0;depth<=maxDepth;depth++) {
-            int level=depth;
-            var row=positions.values().stream().filter(box->box.depth()==level)
-                    .sorted(Comparator.comparingInt(Box::x).thenComparing(Box::path)).map(Box::path).toList();
-            int right=Integer.MIN_VALUE,bottom=previousBottom;
-            for(String path:row) {
+        var placed=new ArrayList<String>();
+        // A subtree shift must never move an already accepted box. Process every parent
+        // before its descendants even if a restored/imported list arrives out of order.
+        var ordered=new ArrayList<>(boxes);
+        ordered.sort(Comparator.comparingInt(Box::depth));
+        for(var incoming:ordered) {
+            String path=incoming.path();
+            // Keep a legal requested position, regardless of depth. Resolve only real
+            // two-dimensional collisions; entire depth bands must not pin upward drags.
+            boolean moved;
+            do {
+                moved=false;
                 var box=positions.get(path);
-                int x=right==Integer.MIN_VALUE?box.x():Math.max(box.x(),right+X_GAP);
-                int y=previousBottom==Integer.MIN_VALUE?box.y():Math.max(box.y(),previousBottom+Y_GAP);
-                int dx=x-box.x(),dy=y-box.y();
-                if(dx!=0 || dy!=0)positions.replaceAll((p,b)->inSubtree(path,p)?b.move(dx,dy):b);
-                box=positions.get(path);right=box.x()+box.width();bottom=Math.max(bottom,box.y()+box.height());
-            }
-            previousBottom=bottom;
+                for(String otherPath:placed) {
+                    var other=positions.get(otherPath);
+                    if(!overlapsWithGap(box,other))continue;
+                    int right=other.x()+other.width()+X_GAP-box.x();
+                    int down=other.y()+other.height()+Y_GAP-box.y();
+                    int dx=right<=down?right:0,dy=right<=down?0:down;
+                    positions.replaceAll((p,b)->inSubtree(path,p)?b.move(dx,dy):b);
+                    moved=true;break;
+                }
+            } while(moved);
+            placed.add(path);
         }
         return List.copyOf(positions.values());
+    }
+    private static boolean overlapsWithGap(Box a,Box b) {
+        return (long)a.x()< (long)b.x()+b.width()+X_GAP
+                && (long)b.x()< (long)a.x()+a.width()+X_GAP
+                && (long)a.y()< (long)b.y()+b.height()+Y_GAP
+                && (long)b.y()< (long)a.y()+a.height()+Y_GAP;
     }
     public static List<Box> drag(List<Box> boxes,String root,int dx,int dy) {return constrain(translate(boxes,root,dx,dy));}
     /** Local offsets inherit the full parent displacement, including off-screen/collapsed descendants. */

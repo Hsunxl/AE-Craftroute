@@ -48,6 +48,8 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     private ITypedIngredient<?> shownMachine,shownEmcMachine;
     private List<ITypedIngredient<?>> emcDevices;
     private String error="",focusedId;
+    private boolean layoutFailed;
+    private int lastLayoutRetry;
     private boolean picking,moving;
     private int pickerPage;
     private ITypedIngredient<?> held;
@@ -61,10 +63,14 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
     }
     private List<ITypedIngredient<?>> rawCatalysts(Entry<?> entry) {
         var type=entry.category().getRecipeType();
-        return catalystCache.computeIfAbsent(type,t->{
-            try {return runtime.getRecipeManager().createRecipeCatalystLookup(type).get().filter(value->!RouteEmcPresentation.isCurrency(ingredientKey(value))).toList();}
-            catch(RuntimeException ignored) {return List.of();}
-        });
+        var cached=catalystCache.get(type);
+        if(cached!=null)return cached;
+        try {
+            var found=runtime.getRecipeManager().createRecipeCatalystLookup(type).get()
+                    .filter(value->!RouteEmcPresentation.isCurrency(ingredientKey(value))).toList();
+            catalystCache.put(type,found);
+            return found;
+        } catch(RuntimeException ignored) {return List.of();} // Retry after a JEI reload.
     }
     public void renderOption(GuiGraphics g,int index,int x,int y,int width,int mx,int my) {
         if(emc.available() && index==recipes.size()) {
@@ -253,25 +259,31 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         } finally {g.pose().popPose();g.disableScissor();}
         return true;
     }
+    private final RoutePreviewSearch previewSearch=new RoutePreviewSearch();
+    private boolean previewSearchPending;
+    public boolean previewRecipeSearchPending() {return previewSearchPending;}
     public String previewRecipeId(RouteView.Choice choice,String knownId) {
-        if(knownId!=null)return knownId;
+        if(knownId!=null) {previewSearchPending=false;return knownId;}
         // Never choose the first output match. Multiple equivalent categories are ambiguous.
-        if(choice==null || choice.alternatives() || recipes.size()>64)return null;
-        String match=null;
-        for(int i=0;i<recipes.size();i++) {
+        if(choice==null || choice.alternatives() || recipes.size()>64) {previewSearchPending=false;return null;}
+        // Creating a JEI layout is expensive. Spread at most four over each hover tick.
+        var result=previewSearch.scan(choice,recipes.size(),4,i->{
             selectIndex(i);
-            if(RouteRecipePreviewMatch.matches(choice,currentDraft())) {
-                if(match!=null)return null;
-                match=recipeId(recipes.get(i));
-            }
-        }
-        return match;
+            return RouteRecipePreviewMatch.matches(choice,currentDraft())?recipeId(recipes.get(i)):null;
+        });
+        previewSearchPending=result.pending();
+        return result.id();
     }
     private record Entry<T>(IRecipeCategory<T> category,T recipe,IFocusGroup focus) {}
     RouteJeiRecipes(IJeiRuntime runtime) {this.runtime=runtime;}
+    public void invalidateMappings() {
+        key=null;catalystCache.clear();recipes.clear();layout=null;machines=List.of();error="";layoutFailed=false;
+        previewSearch.clear();previewSearchPending=false;
+    }
     public void select(AEKey key) {
-        if(Objects.equals(key,this.key))return;
-        this.key=key;machineTray.clear();variants.clear();groupedMachines.clear();optionMachine.clear();focusedId=null;index=0;picking=false;held=null;recipes.clear();layout=null;error="";
+        if(Objects.equals(key,this.key) && (!layoutFailed || ticks-lastLayoutRetry<100))return;
+        this.key=key;catalystCache.clear();machineTray.clear();variants.clear();groupedMachines.clear();optionMachine.clear();focusedId=null;index=0;picking=false;held=null;recipes.clear();layout=null;error="";
+        previewSearch.clear();previewSearchPending=false;
         emc=RouteEmcAccess.query(key);
         if(key==null)return;
         try {
@@ -296,10 +308,10 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         return runtime.getRecipeManager().createRecipeLayoutDrawable(entry.category(),entry.recipe(),entry.focus()).orElse(null);
     }
     private void load() {
-        machineTray.clear();layout=null;stableDraft=null;shownMachine=null;machines=List.of();bodyHeight=0;error="";emcScroll=0;
+        machineTray.clear();layout=null;stableDraft=null;shownMachine=null;machines=List.of();bodyHeight=0;error="";emcScroll=0;layoutFailed=false;
         if(emcSelected() || recipes.isEmpty())return;
         try {layout=create(recipes.get(index));}
-        catch(RuntimeException e) {error="此插件的原生配方布局无法创建";}
+        catch(RuntimeException e) {error="此插件的原生配方布局无法创建";layoutFailed=true;lastLayoutRetry=ticks;}
         if(layout!=null)try {machines=catalysts(recipes.get(index));}
         catch(RuntimeException ignored) {machines=List.of();}
     }
@@ -319,6 +331,7 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         this.x=x;this.y=y;this.w=w;this.h=h;lastMouseX=mx;lastMouseY=my;
         var font=Minecraft.getInstance().font;
         bodyHeight=Math.max(0,h-44);
+        if(count()>0 && index>=count()) {index=count()-1;load();}
         if(count()>0) {
             String title=emcSelected()?"EMC 转换":recipes.get(index).category().getTitle().getString();
             button(g,x,y,w-24,"配方 "+(index+1)+" / "+count()+" ▾ "+font.plainSubstrByWidth(title,Math.max(1,w-110)));
@@ -487,7 +500,14 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
             if(button==0 && clickedSlot.isPresent() && clickedSlot.get().getRole()==RecipeIngredientRole.INPUT) {
                 var displayed=clickedSlot.get().getDisplayedIngredient();
                 if(displayed.isPresent() && ingredientKey(displayed.get())!=null) {
-                    held=displayed.get();stableDraft=RouteJeiPlugin.readDraft(layout,stableDraft,clickedSlot.get());heldDraft=stableDraft;moving=false;pressX=dragX=mx;pressY=dragY=my;return true;
+                    try {
+                        var draft=RouteJeiPlugin.readDraft(layout,stableDraft,clickedSlot.get());
+                        stableDraft=draft;heldDraft=draft;held=displayed.get();moving=false;
+                        pressX=dragX=mx;pressY=dragY=my;
+                    } catch(RuntimeException e) {
+                        held=null;heldDraft=null;error=e.getMessage();
+                    }
+                    return true;
                 }
             }
             if(layout.getInputHandler().handleInput(rx,ry,input(InputConstants.Type.MOUSE.getOrCreate(button))))return true;

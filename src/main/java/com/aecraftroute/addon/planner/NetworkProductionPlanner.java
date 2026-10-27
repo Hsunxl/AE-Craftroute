@@ -97,14 +97,16 @@ public final class NetworkProductionPlanner {
                 for(var step:block.word()) word.add(new ProductionPlanner.Step<>(recipes.get(step.recipe()).id(),step.count()));
                 program.add(new ProductionPlanner.Block<>(word,block.repetitions()));
             }
-            long bytes=Math.max(1,Math.multiplyExact(8L,Math.addExact(result.program().size(),counts.size()+used.size())));
+            // AE2 charges one crafting byte per pattern firing, not per input slot,
+            // program block, or distinct key. Match CraftingTreeProcess.addBytes(count).
+            long bytes=0;
             for(var entry:counts.entrySet()) {
                 // Check native task/tracker multiplication too; no long saturation.
                 for(var out:entry.getKey().getOutputs()) Math.multiplyExact(Math.multiplyExact(out.amount(),entry.getValue()),out.what().getAmountPerUnit());
-                bytes=Math.addExact(bytes,Math.multiplyExact(entry.getValue(),entry.getKey().getInputs().length+1L));
+                bytes=Math.addExact(bytes,entry.getValue());
             }
             remaining(started,limits);
-            return new CertifiedCraftingPlan(new GenericStack(target,increment),bytes,used,counts,program);
+            return new CertifiedCraftingPlan(new GenericStack(target,increment),Math.max(1,bytes),used,counts,program);
         } catch(ArithmeticException ex) { throw new ProductionPlanningException(LIMIT,"计划超过 AE2 的整数容量，未提交不完整任务"); }
     }
     static ProductionPlanCache.Stats cacheStats() { return CACHE.stats(); }

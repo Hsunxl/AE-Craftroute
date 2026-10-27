@@ -8,6 +8,7 @@ import java.util.function.Consumer;
 /** Optional integration boundary: the canvas can load without JEI installed. */
 public interface RouteRecipeBrowser {
     void select(AEKey key);
+    default void invalidateMappings() {}
     void render(GuiGraphics graphics, int x, int y, int width, int height, int mx, int my);
     boolean click(double x, double y, int button, Consumer<RouteView.Draft> choose);
     void page(int delta);
@@ -34,6 +35,8 @@ public interface RouteRecipeBrowser {
     /** Read-only exact recipe preview; never falls back to another recipe for the same output. */
     default boolean renderPreview(String id,GuiGraphics graphics,int x,int y,int width,int height,int mx,int my) {return false;}
     default String previewRecipeId(RouteView.Choice choice,String knownId) {return knownId;}
+    /** A null preview id can mean the bounded equivalent-recipe search is still running. */
+    default boolean previewRecipeSearchPending() {return false;}
     default void renderRecipeBadge(String id,GuiGraphics graphics,int x,int y,int mx,int my) {renderMachine(id,graphics,x,y,-1000000,-1000000);}
     default boolean scroll(double x,double y,double sx,double sy) {return false;}
     default boolean drag(double x,double y,int button,double dx,double dy) {return false;}

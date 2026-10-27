@@ -52,7 +52,7 @@ public final class RouteQaFixtures {
         p.displayClientMessage(Component.literal("QA network placed; /aecraftrouteqa fill, then /aecraftrouteqa open"),false);
     }
 
-    /** Stocks the fixture network and installs the single processing pattern the check crafts through. */
+    /** Stocks the fixture network and installs an executable vanilla crafting pattern. */
     public static void fill(ServerPlayer p) {
         var a=anchor(p);
         var chest=(MEChestBlockEntity)p.serverLevel().getBlockEntity(a.offset(1,0,0));
@@ -60,9 +60,23 @@ public final class RouteQaFixtures {
         for(var id:List.of("ae2:blank_pattern","minecraft:iron_ingot","minecraft:gold_ingot","minecraft:copper_ingot"))
             inv.insert(AEItemKey.of(item(id,1)),128,Actionable.MODULATE,IActionSource.empty());
         var provider=(PatternProviderBlockEntity)p.serverLevel().getBlockEntity(a.offset(2,0,0));
-        var encoded=PatternDetailsHelper.encodeProcessingPattern(List.of(new GenericStack(AEItemKey.of(item("minecraft:iron_ingot",1)),9)),List.of(new GenericStack(AEItemKey.of(item("minecraft:iron_block",1)),1)));
-        provider.getLogic().getPatternInv().setItemDirect(0,encoded);
-        p.displayClientMessage(Component.literal("QA network filled: blanks + ingots + one processing pattern"),false);
+        provider.getLogic().getPatternInv().setItemDirect(0,ironBlockPattern(p.serverLevel()));
+        provider.getLogic().updatePatterns();
+        p.displayClientMessage(Component.literal("QA network filled: blanks + ingots + one executable crafting pattern"),false);
+    }
+
+    /** Shared by the isolated client fixture and dedicated-server execution check. */
+    public static ItemStack ironBlockPattern(net.minecraft.server.level.ServerLevel level) {
+        var holder=level.getRecipeManager().byKey(ResourceLocation.parse("minecraft:iron_block"))
+                .orElseThrow(()->new IllegalStateException("QA iron block crafting recipe is missing"));
+        if(!(holder.value() instanceof net.minecraft.world.item.crafting.CraftingRecipe recipe))
+            throw new IllegalStateException("QA iron block recipe is not a crafting recipe");
+        var ingredients=new ItemStack[9];
+        for(int i=0;i<ingredients.length;i++)ingredients[i]=item("minecraft:iron_ingot",1);
+        var encoded=PatternDetailsHelper.encodeCraftingPattern(
+                new net.minecraft.world.item.crafting.RecipeHolder<>(holder.id(),recipe),
+                ingredients,item("minecraft:iron_block",1),false,false);
+        return encoded;
     }
 
     public static void openChest(ServerPlayer p) {

@@ -57,18 +57,17 @@ public final class CraftRouteCraftingRegistry {
     /**
      * Whether a requester class belongs to a third-party mod that has NOT opted in.
      * <p>
-     * AE2's own classes ({@code appeng.*}) are never considered third-party, so
-     * requests they initiate are always handled by the VM. Anything outside AE2
-     * is a third-party requester: it is only handled by the VM once its owning
-     * mod calls {@link #register(String)}; otherwise it is left to that mod's
-     * own crafting logic.
+     * AE2's own classes ({@code appeng.*}) and this mod's own requesters are not
+     * third-party. Other classes are only handled by the VM once their owning mod
+     * calls {@link #register(String)}; otherwise they keep their own crafting logic.
      *
      * @param className fully-qualified requester class name
      * @return {@code true} if the requester is third-party and NOT registered
      */
     public static boolean isUnregisteredThirdParty(String className) {
         if (className == null) return false;
-        if (className.startsWith("appeng.")) return false; // AE2's own → VM handles
+        if (className.startsWith("appeng.") || className.startsWith("com.aecraftroute.addon."))
+            return false; // AE2 and this mod's own requesters
         return !isRegistered(className);
     }
 

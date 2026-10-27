@@ -14,8 +14,10 @@ public final class RouteNativePatternIcon {
     private RouteNativePatternIcon() {}
     private static AEKey icon(List<RouteView.PatternSource> sources) {
         var mc=Minecraft.getInstance();
-        for(var source:sources)if(source.icon()!=null)try {return source.icon().decode(mc.level.registryAccess());}
-            catch(RuntimeException invalid) { /* Retain a truthful pattern fallback. */ }
+        for(var source:sources)if(source.icon()!=null)try {
+            var decoded=source.icon().decode(mc.level.registryAccess());
+            if(decoded!=null)return decoded;
+        } catch(RuntimeException invalid) { /* Retain a truthful pattern fallback. */ }
         return AEItemKey.of(AEItems.PROCESSING_PATTERN.stack());
     }
     public static void draw(GuiGraphics g,int x,int y,List<RouteView.PatternSource> sources) {

@@ -10,7 +10,6 @@ import appeng.api.networking.crafting.ICraftingSimulationRequester;
 import appeng.api.networking.crafting.ICraftingSubmitResult;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEKey;
-import appeng.me.cluster.implementations.CraftingCPUCluster;
 import appeng.me.service.CraftingService;
 import com.aecraftroute.addon.api.CraftRouteCraftingRegistry;
 import com.aecraftroute.addon.planner.CertifiedCraftingPlan;
@@ -89,14 +88,8 @@ public abstract class CraftingServiceMixin {
         try {
             for (ICraftingCPU candidate : grid.getCraftingService().getCpus()) {
                 if (candidate == target) continue;
-                // The certified executor is installed only on native and AdvancedAE CPUs.
-                // Do not feed its program to Trinity/ECO executors with different contracts.
-                boolean compatible = candidate instanceof CraftingCPUCluster
-                        || candidate.getClass().getName().startsWith("net.pedroksl.advanced_ae.");
-                if (plan instanceof CertifiedCraftingPlan && !compatible) {
-                    attempts.add(CpuProbe.describe(candidate) + " -> skipped incompatible certified executor");
-                    continue;
-                }
+                // Certified plans returned above and use their dedicated dispatcher;
+                // do not impose that CPU compatibility filter on third-party plans.
                 ICraftingSubmitResult retry = original.call(plan, requestingMachine, candidate, prioritizePower, src);
                 if (retry != null && retry.successful()) {
                     com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
@@ -134,9 +127,12 @@ public abstract class CraftingServiceMixin {
             CallbackInfoReturnable<Future<ICraftingPlan>> cir) {
         
         long startTime = System.nanoTime();
+        // Third-party requesters that did not opt in keep their own planner and executor,
+        // even when a player's canvas session has manual constraints.
+        if (isUnregisteredThirdPartyRequester(simRequester)) return;
         // 配置开关：proxy.enabled=false 时完全禁用 VM 代理，交给原生 AE2 递归计算
         if (!com.aecraftroute.addon.config.CraftRouteConfig.isProxyEnabled()) {
-            if (!com.aecraftroute.addon.route.RouteSessions.get(grid, simRequester).rules().isEmpty()) {
+            if (!com.aecraftroute.addon.route.RouteSessions.get(grid, simRequester).empty()) {
                 cir.setReturnValue(java.util.concurrent.CompletableFuture.failedFuture(
                         new com.aecraftroute.addon.route.RoutePlanningException("AE-Craftroute 已关闭；请清除手动约束或重新开启，未绕过约束")));
             }
@@ -144,7 +140,7 @@ public abstract class CraftingServiceMixin {
         }
         
         // Manual requests have an isolated failure path: NEVER fall back to unrestricted AE2.
-        if (!com.aecraftroute.addon.route.RouteSessions.get(grid, simRequester).rules().isEmpty()) {
+        if (!com.aecraftroute.addon.route.RouteSessions.get(grid, simRequester).empty()) {
             var future = com.aecraftroute.addon.telemetry.PlanningTelemetry.observe(com.aecraftroute.addon.api.CraftRouteCrafting.calculate(grid, simRequester, what, amount, strategy), startTime, what, amount, true);
             future.whenComplete((plan, error) -> {
                 if (error != null && simRequester != null && !com.aecraftroute.addon.telemetry.PlanningTelemetry.outcome(error).equals("cancelled")) simRequester.getActionSource().player().ifPresent(player -> {
@@ -161,8 +157,6 @@ public abstract class CraftingServiceMixin {
         
         try {
             // Do not cancel the injection: AE2 executes its original body exactly once.
-            if (isUnregisteredThirdPartyRequester(simRequester)) return;
-            
             // Delegate core computation to the public API.
             // Third-party mods can also call CraftRouteCrafting.calculate directly.
             var calculation=com.aecraftroute.addon.telemetry.PlanningTelemetry.observe(com.aecraftroute.addon.api.CraftRouteCrafting.calculate(grid,simRequester,what,amount,strategy),startTime,what,amount,false);

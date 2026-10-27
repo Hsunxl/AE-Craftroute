@@ -367,11 +367,12 @@ public final class ProductionPlanner<K, R> {
                 var d=delta(r);
                 long batch=jump(node.need,d);
                 // Accelerators add edges; the ordinary one-step predecessor is NEVER omitted.
-                if(batch>1) offer(new Node(pre(node.need,inputs[r],d,batch),node,
-                        new Block<>(List.of(new Step<>(recipes.get(r).id,batch)),1)),basis,queue);
+                if(batch>1 && offer(new Node(pre(node.need,inputs[r],d,batch),node,
+                        new Block<>(List.of(new Step<>(recipes.get(r).id,batch)),1)),basis,queue))
+                    return failure(Status.LIMIT,explored);
                 Node child=new Node(pre(node.need,inputs[r],d,1),node,
                         new Block<>(List.of(new Step<>(recipes.get(r).id,1)),1));
-                offer(child,basis,queue);
+                if(offer(child,basis,queue)) return failure(Status.LIMIT,explored);
                 // Compose any short word, not a named two-node ring. Repeating a word
                 // preserves its exact prefix seed requirement, including all side inputs.
                 var word=new ArrayList<Step<R>>(); word.add(new Step<>(recipes.get(r).id,1));
@@ -381,20 +382,42 @@ public final class ProductionPlanner<K, R> {
                     word.add(end.block.word.getFirst()); end=end.next;
                     var summary=summarize(word);
                     long rounds=jump(end.need,summary[1]);
-                    if(rounds>1) offer(new Node(pre(end.need,summary[0],summary[1],rounds),end,
-                            new Block<>(word,rounds)),basis,queue);
+                    if(rounds>1 && offer(new Node(pre(end.need,summary[0],summary[1],rounds),end,
+                            new Block<>(word,rounds)),basis,queue)) return failure(Status.LIMIT,explored);
                 }
                 if(basis.size()+queue.size()>limits.states*4L) return failure(Status.LIMIT,explored);
             }
         }
         return failure(clipped?Status.LIMIT:Status.UNREACHABLE,explored);
     }
-    private void offer(Node n, List<Node> basis, Queue<Node> queue) {
+    /** @return true if the deadline expired during dominance scanning. */
+    private boolean offer(Node n, List<Node> basis, Queue<Node> queue) {
         // A key with no producer can never be reduced by backwards regression.
-        for(int k=0;k<keys.size();k++) if(!produced[k] && n.need[k].compareTo(stock[k])>0) return;
-        for(var old:basis) if(le(old.need,n.need)) return;
-        for(var it=basis.iterator();it.hasNext();) { var old=it.next(); if(le(n.need,old.need)) { old.active=false; it.remove(); } }
+        for(int k=0;k<keys.size();k++) {
+            if((k&31)==0 && expired()) return true;
+            if(!produced[k] && n.need[k].compareTo(stock[k])>0) return false;
+        }
+        for(var old:basis) {
+            int relation=leWithinBudget(old.need,n.need);
+            if(relation<0) return true;
+            if(relation>0) return false;
+        }
+        for(var it=basis.iterator();it.hasNext();) {
+            var old=it.next();
+            int relation=leWithinBudget(n.need,old.need);
+            if(relation<0) return true;
+            if(relation>0) { old.active=false; it.remove(); }
+        }
         basis.add(n); queue.add(n); fair.add(n);
+        return false;
+    }
+    /** -1 = deadline, 0 = not dominated, 1 = dominated. */
+    private int leWithinBudget(BigInteger[] a,BigInteger[] b) {
+        for(int k=0;k<keys.size();k++) {
+            if((k&31)==0 && expired()) return -1;
+            if(a[k].compareTo(b[k])>0) return 0;
+        }
+        return 1;
     }
     /** Minimal prefix capital and signed net change of a straight-line word. */
     private BigInteger[][] summarize(List<Step<R>> word) {

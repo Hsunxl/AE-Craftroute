@@ -8,6 +8,22 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RouteGraphMathTest {
+    @Test void parentLookupDoesNotSlicePathsWithoutASeparator() {
+        assertNull(RouteGraphMath.parentPath(null));
+        assertNull(RouteGraphMath.parentPath("root"));
+        assertNull(RouteGraphMath.parentPath("foreign-root"));
+        assertEquals("root/1",RouteGraphMath.parentPath("root/1/2"));
+    }
+    @Test void acceptedServerPathDepthMatchesLastClientGeneratedChild() {
+        String path="root";
+        for(int depth=1;depth<=RouteGraphMath.MAX_PATH_DEPTH;depth++) {
+            path=RouteGraphMath.childPath(path,0);
+            assertTrue(RouteGraphMath.validPath(path));
+        }
+        String terminal=path;
+        assertThrows(IllegalArgumentException.class,()->RouteGraphMath.childPath(terminal,0));
+        assertFalse(RouteGraphMath.validPath(path+"/0"));
+    }
     private static RouteView.Stack stack(String key, long amount) {
         return new RouteView.Stack(key, key, amount);
     }

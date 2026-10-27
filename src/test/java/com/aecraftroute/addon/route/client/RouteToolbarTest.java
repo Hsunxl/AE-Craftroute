@@ -4,7 +4,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 class RouteToolbarTest {
     @Test void mappingReloadFitsTheExpandedWorkspace() {
-        for(int width:new int[]{320,400,504,630,1056})for(int count:new int[]{8,9}) {
+        for(int width:new int[]{320,400,504,630,1056})for(int count:new int[]{8,9,10}) {
             var cells=RouteToolbar.of(width-16,count);
             assertTrue(cells.buttonWidth()>=26);
             assertTrue((count-1)*cells.cellWidth()+cells.buttonWidth()<=width-16);

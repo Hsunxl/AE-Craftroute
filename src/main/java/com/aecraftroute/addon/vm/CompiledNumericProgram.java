@@ -23,6 +23,7 @@ public final class CompiledNumericProgram {
 
     public int keyCount() { return keyCount; }
     public int recipeCount() { return entries.length; }
+    int instructionCount() { return code.length; }
     public byte[] code() { return code.clone(); }
     public int[] operands() { return operands.clone(); }
     public int[] entryPoints() { return entries.clone(); }

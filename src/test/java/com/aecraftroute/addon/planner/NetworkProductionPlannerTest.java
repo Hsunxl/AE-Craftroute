@@ -38,6 +38,12 @@ class NetworkProductionPlannerTest {
         assertEquals(1,inventory.extract(a,10,Actionable.SIMULATE)); assertTrue(job.allows(p));
         assertFalse(job.done());
     }
+    @Test void cpuStorageCountsPatternFiringsRatherThanInputSlotsOrPlanMetadata() {
+        var p=new BenchPatternDetails(target,1,List.of(of(a,1),of(b,1)));
+        var result=plan(List.of(p),Map.of(a,5L,b,5L),target,5);
+        assertEquals(5L,result.patternTimes().get(p));
+        assertEquals(5L,result.bytes());
+    }
     @Test void containerReturnsAreReusableAndNotCreditedBeforeArrival() {
         var p=new BenchPatternDetails(target,1,List.of(returned(tool,1),of(fuel,1)));
         var result=plan(List.of(p),Map.of(tool,1L,fuel,20L),target,20);

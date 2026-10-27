@@ -22,6 +22,15 @@ class RoutePolicyTest {
     @Test void deeplyImmutable() { var bans=new HashSet<>(Set.of("x"));var map=new HashMap<String,RoutePolicy.Rule>();map.put("a",new RoutePolicy.Rule(null,bans,false));var p=new RoutePolicy<>(map);bans.clear();map.clear();assertTrue(p.rule("a").banned().contains("x")); }
     @Test void rejectsUnknownActionsAndEmptyIdentity() { assertThrows(IllegalArgumentException.class,()->empty().change("dust","evil",""));assertThrows(IllegalArgumentException.class,()->empty().change("dust","lock","")); }
     @Test void nullQueryIsAutomatic() { assertEquals(RoutePolicy.Rule.automatic(),empty().rule(null)); }
+    @Test void clearingOnlyCanvasPreservesMaterialRules() {
+        var rules=empty().change("dust","lock","external");
+        var forced=new RoutePolicy<>(rules.rules(),new RoutePolicy.Canvas<>("dust",4,List.of(new RoutePolicy.Path<>("root","dust","external"))));
+        var cleared=forced.withoutCanvas();
+        assertNull(cleared.canvas());
+        assertEquals(rules.rules(),cleared.rules());
+        assertEquals(List.of("external"),choices(cleared));
+        assertSame(cleared,cleared.withoutCanvas());
+    }
     @Test void boundsRuleCount() { var p=empty();for(int i=0;i<128;i++)p=p.change("k"+i,"stock","");var full=p;assertThrows(IllegalArgumentException.class,()->full.change("extra","stock","")); }
     @Test void manualErrorsRemainIdentifiableThroughFutureWrappers() { assertTrue(RoutePlanningException.contains(new CompletionException(new RoutePlanningException("missing"))));assertFalse(RoutePlanningException.contains(new IllegalStateException())); }
 }

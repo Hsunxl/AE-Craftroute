@@ -17,8 +17,7 @@ class TerminalDeliveryTest {
     }
     @Test void overestimatedTargetReturnsDoNotPinARealSatisfiedGoal() {
         var job=simple(3,2,4);var inventory=new KeyCounter();inventory.add(target,4);
-        var waiting=new KeyCounter();waiting.add(target,2);waiting.add(other,900);
-        assertFalse(job.readyToDeliver(waiting,target)); // legacy estimate-based gate would hold forever
+        // Delivery is based only on physical terminal surplus, never a waitingFor estimate.
         assertEquals(4,job.deliverableAmount(inventory,target,4));
     }
     @Test void extraOutputIsNotOverdeliveredAndCanBeReturnedByNativeCleanup() {

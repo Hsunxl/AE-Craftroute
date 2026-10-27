@@ -30,7 +30,8 @@ final class RouteRecipeHover {
             if(!RouteEmcRules.isEmc(id) && RouteClient.recipeBrowser!=null)try {
                 preview=RouteClient.recipeBrowser.get();preview.select(target);
                 this.id=preview.previewRecipeId(choice,id);
-                if(this.id==null)preview=null;else preview.focusRecipe(this.id);
+                if(this.id==null && !preview.previewRecipeSearchPending())preview=null;
+                else if(this.id!=null)preview.focusRecipe(this.id);
             } catch(RuntimeException e) {failure(e);}
         }
         ax=x;ay=y;aw=width;ah=height;box=RouteRecipePreviewBox.of(x,y,width,sw,sh);
@@ -39,7 +40,14 @@ final class RouteRecipeHover {
         if(!failed)LOG.warn("Recipe hover preview failed for {}; using actual pattern inputs/outputs",id,e);
         failed=true;preview=null;
     }
-    void tick() {if(preview!=null)try {preview.tick();}catch(RuntimeException e){failure(e);}}
+    void tick() {if(preview!=null)try {
+        if(id==null && preview.previewRecipeSearchPending()) {
+            id=preview.previewRecipeId(choice,null);
+            if(id!=null)preview.focusRecipe(id);
+            else if(!preview.previewRecipeSearchPending()) {preview=null;return;}
+        }
+        preview.tick();
+    }catch(RuntimeException e){failure(e);}}
     void render(GuiGraphics g,int mx,int my) {
         if(box==null)return;
         if(!(mx>=ax && mx<ax+aw && my>=ay && my<ay+ah) && !box.contains(mx,my)) {clear();return;}

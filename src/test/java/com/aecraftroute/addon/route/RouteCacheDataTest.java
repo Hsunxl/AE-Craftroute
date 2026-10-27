@@ -41,4 +41,13 @@ class RouteCacheDataTest {
         assertThrows(IllegalArgumentException.class,()->RouteCacheData.entry(cache,1,"new"));
         cache.remove("0");assertThrows(IllegalArgumentException.class,()->RouteCacheData.entry(cache,0,"new"));
     }
+    @Test void onlyExplicitlyConfirmedUnreadableSlotCanBeDiscarded() {
+        var cache=new CompoundTag();cache.putLong("revision",3);
+        cache.put("0",entry("healthy"));cache.putString("1","unreadable raw data");
+        assertThrows(IllegalArgumentException.class,()->RouteCacheData.discardUnreadable(cache,0,3,e->true));
+        assertThrows(IllegalArgumentException.class,()->RouteCacheData.discardUnreadable(cache,1,2,e->false));
+        assertTrue(cache.contains("0"));assertTrue(cache.contains("1"));
+        RouteCacheData.discardUnreadable(cache,1,3,e->false);
+        assertTrue(cache.contains("0"));assertFalse(cache.contains("1"));
+    }
 }

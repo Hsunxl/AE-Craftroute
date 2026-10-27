@@ -50,7 +50,10 @@ public final class RouteMachineTray<T> {
     }
     public boolean click(double mx,double my,int button,Consumer<T> show) {
         if(grid==null || !grid.contains(mx,my))return false;
-        int hit=grid.hit(mx,my,first);if(button==0 && hit>=0)show.accept(values.get(hit));return true;
+        int hit=grid.hit(mx,my,first);
+        if(hit<0)return false; // Header and empty padding are not machine targets.
+        if(button==0)show.accept(values.get(hit));
+        return true;
     }
     public boolean scroll(double mx,double my,double delta) {
         if(grid==null || !grid.contains(mx,my))return false;

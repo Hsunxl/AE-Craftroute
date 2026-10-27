@@ -24,7 +24,7 @@ class RoutePlanningServiceTest {
     final RoutePolicy<AEKey> policy=new RoutePolicy<>(Map.of());
     final ProductionPlanner.Limits limits=new ProductionPlanner.Limits(6000,5_000_000_000L);
     final AtomicInteger captures=new AtomicInteger(),validations=new AtomicInteger(),commits=new AtomicInteger();
-    @AfterEach void close() throws Exception {RoutePlanningService.clearReuse();workers.shutdownNow();assertTrue(workers.awaitTermination(3,TimeUnit.SECONDS));}
+    @AfterEach void close() throws Exception {RoutePlanningService.stopped(null);workers.shutdownNow();assertTrue(workers.awaitTermination(3,TimeUnit.SECONDS));}
     RoutePlanningService.CaptureWork capture(IPatternDetails pattern,boolean changed) {
         return new RoutePlanningService.CaptureWork() {
             int calls;
@@ -91,6 +91,16 @@ class RoutePlanningServiceTest {
         assertTrue(jobs.isEmpty());assertTrue(running.result.isCancelled());assertTrue(waiting.result.isCancelled());assertTrue(interrupted.await(3,TimeUnit.SECONDS));
         RoutePlanningService.tickJobs(jobs,System.nanoTime()+100_000_000L);assertEquals(0,commits.get());assertEquals(0,validations.get());
     }
+    @Test void serverStopShutsDownProductionPoolAndNextWorldGetsAFreshPool() {
+        var first=liveJob(Map.of(ore,1L));
+        var oldPool=assertInstanceOf(ThreadPoolExecutor.class,first.executor);
+        assertFalse(oldPool.isShutdown());
+        RoutePlanningService.stopped(null);
+        assertTrue(oldPool.isShutdown());
+        var second=liveJob(Map.of(ore,1L));
+        assertNotSame(oldPool,second.executor);
+        assertFalse(second.executor.isShutdown());
+    }
     @Test void twoPreviewsOnlyLastLeaseCommitsEvenWhenOldWorkerIgnoresCancellation() throws Exception {
         var leases=new RoutePlanningRequests<String>();var first=leases.replace("p",1);
         var entered=new CountDownLatch(1);var release=new CountDownLatch(1);var interrupted=new CountDownLatch(1);
@@ -116,6 +126,37 @@ class RoutePlanningServiceTest {
         assertInstanceOf(ProductionPlanningException.class,error.getCause());
         assertEquals(ProductionPlanningException.Reason.LIMIT,((ProductionPlanningException)error.getCause()).reason());
         assertEquals(0,commits.get());assertEquals(0,validations.get());
+    }
+    @Test void actualProductionPoolRejectsFullQueueAndRecoversWithoutLosingAcceptedJobs() throws Exception {
+        var pool=assertInstanceOf(ThreadPoolExecutor.class,liveJob(Map.of(ore,1L)).executor);
+        var started=new CountDownLatch(2);var release=new CountDownLatch(1);
+        Runnable blocker=()->{started.countDown();try{release.await();}catch(InterruptedException e){Thread.currentThread().interrupt();}};
+        pool.submit(blocker);pool.submit(blocker);
+        assertTrue(started.await(3,TimeUnit.SECONDS));
+        var queued=new ArrayList<RoutePlanningService.Job>();
+        try {
+            assertEquals(2,pool.getMaximumPoolSize());
+            assertEquals(8,pool.getQueue().remainingCapacity());
+            for(int i=0;i<8;i++) {
+                var accepted=new RoutePlanningService.Job(policy,target,1,limits,()->true,pool,capture(plain,false));
+                queued.add(accepted);tick(accepted);
+                assertNotNull(accepted.worker);assertFalse(accepted.result.isDone());
+            }
+            assertEquals(8,pool.getQueue().size());
+            var rejected=new RoutePlanningService.Job(policy,target,1,limits,()->true,pool,capture(plain,false));
+            tick(rejected);
+            var error=assertThrows(ExecutionException.class,()->rejected.result.get(1,TimeUnit.SECONDS));
+            var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
+            assertEquals(ProductionPlanningException.Reason.LIMIT,failure.reason());
+            assertTrue(failure.getMessage().contains("不是缺料"));assertNull(rejected.worker);
+            assertEquals(0,validations.get());assertFalse(pool.isShutdown());
+            release.countDown();
+            for(var accepted:queued) {finishWorker(accepted);tick(accepted);assertNotNull(accepted.result.get(1,TimeUnit.SECONDS));}
+            assertEquals(8,validations.get());
+            var recovered=new RoutePlanningService.Job(policy,target,1,limits,()->true,pool,capture(plain,false));
+            tick(recovered);finishWorker(recovered);tick(recovered);
+            assertNotNull(recovered.result.get(1,TimeUnit.SECONDS));assertEquals(9,validations.get());
+        } finally {release.countDown();}
     }
     @Test void expiredEndToEndBudgetDoesNotStartCaptureOrBecomeMissingMaterials() {
         var job=new RoutePlanningService.Job(policy,target,1,new ProductionPlanner.Limits(6000,1),()->true,workers,capture(plain,false));
@@ -166,6 +207,45 @@ class RoutePlanningServiceTest {
             assertTrue(failure.getMessage().contains("阶段=worker queue"));
             assertInstanceOf(ProductionPlanningException.class,failure.getCause());
         } finally {release.countDown();}
+    }
+    RoutePlanningService.CaptureWork sliceLimitedCapture(AtomicInteger checks,boolean alwaysExpire,AtomicBoolean changed) {
+        return new RoutePlanningService.CaptureWork() {
+            public boolean advance(){return true;}
+            public RouteSnapshot.Result result(){return new RouteSnapshot.Result(Map.of(target,List.of(plain)),Map.of(ore,1L));}
+            public void validate(long deadline,long validationEnd,CertifiedCraftingPlan plan) {
+                assertSame(serverThread,Thread.currentThread());
+                int attempt=checks.incrementAndGet();
+                if(changed.get())throw new ProductionPlanningException(ProductionPlanningException.Reason.INVALID,"changed before retry");
+                RoutePlanningService.checkValidationBudget(deadline,alwaysExpire || attempt==1 ? System.nanoTime()-1 : validationEnd);
+            }
+        };
+    }
+    @Test void validationSliceRetryRestartsWholeCheckWithoutExtendingDeadlineOrReplanning() throws Exception {
+        var checks=new AtomicInteger();
+        var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,sliceLimitedCapture(checks,false,new AtomicBoolean()));
+        long deadline=job.deadline;tick(job);finishWorker(job);var worker=job.worker;tick(job);
+        assertFalse(job.result.isDone());assertEquals(1,checks.get());
+        tick(job);assertNotNull(job.result.get(1,TimeUnit.SECONDS));assertEquals(2,checks.get());
+        assertEquals(deadline,job.deadline);assertSame(worker,job.worker);
+    }
+    @Test void validationRetryRejectsChangedStateInsteadOfCommittingPreviouslyCheckedPrefix() throws Exception {
+        var checks=new AtomicInteger();var changed=new AtomicBoolean();
+        var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,sliceLimitedCapture(checks,false,changed));
+        tick(job);finishWorker(job);tick(job);assertFalse(job.result.isDone());
+        changed.set(true);tick(job);
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        assertEquals(ProductionPlanningException.Reason.INVALID,assertInstanceOf(ProductionPlanningException.class,error.getCause()).reason());
+        assertEquals(2,checks.get());
+    }
+    @Test void repeatedValidationSliceExpiryIsBoundedAndDoesNotBecomeMissingMaterials() throws Exception {
+        var checks=new AtomicInteger();
+        var job=new RoutePlanningService.Job(policy,target,1,limits,()->true,workers,sliceLimitedCapture(checks,true,new AtomicBoolean()));
+        tick(job);finishWorker(job);
+        tick(job);tick(job);assertFalse(job.result.isDone());tick(job);
+        var error=assertThrows(ExecutionException.class,()->job.result.get(1,TimeUnit.SECONDS));
+        var failure=assertInstanceOf(ProductionPlanningException.class,error.getCause());
+        assertEquals(ProductionPlanningException.Reason.LIMIT,failure.reason());
+        assertTrue(failure.getMessage().contains("阶段=validation"));assertEquals(3,checks.get());
     }
     @Test void workerComputationLimitFailureIsAttributedAndRetainsOriginalFailure() throws Exception {
         var original=new ProductionPlanningException(ProductionPlanningException.Reason.LIMIT,"worker budget exhausted");
@@ -327,7 +407,9 @@ class RoutePlanningServiceTest {
         assertEquals(deadline,job.deadline);assertEquals(1,refreshes.get());assertNull(job.worker);
     }
     private CertifiedCraftingPlan complete(RoutePlanningService.Job job) throws Exception {
-        tick(job);finishWorker(job);tick(job);return job.result.get(1,TimeUnit.SECONDS);
+        tick(job);finishWorker(job);
+        for(int i=0;i<3 && !job.result.isDone();i++)tick(job);
+        return job.result.get(1,TimeUnit.SECONDS);
     }
     private RoutePlanningService.Job repeat(RoutePlanningService.Job first) {
         return new RoutePlanningService.Job(first.gridRef,policy,null,target,1,limits,()->true);

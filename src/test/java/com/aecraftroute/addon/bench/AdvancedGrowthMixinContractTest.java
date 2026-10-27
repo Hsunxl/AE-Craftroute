@@ -61,12 +61,26 @@ class AdvancedGrowthMixinContractTest {
             assertTrue(config.contains("\"" + name + "\""));
             assertTrue(annotation(node(MIXIN + name), "Lorg/spongepowered/asm/mixin/Pseudo;"), name);
         }
-        var cpu = node(MIXIN + "AdvancedGrowthCpuMixin");
-        for (var method : cpu.methods) for (var insn : method.instructions) {
-            if (insn instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD)
-                assertNotEquals("remainingAmount", f.name, "Retaining feedback is not order delivery");
-            if (insn instanceof MethodInsnNode m)
-                assertNotEquals("appeng/crafting/CraftingLink", m.owner, "Only original insert may deliver surplus");
+        for(String name:List.of("GrowthCpuMixin","AdvancedGrowthCpuMixin")) {
+            var cpu = node(MIXIN + name);
+            boolean hasFlushDelivery=false;
+            for (var method : cpu.methods) for (var insn : method.instructions) {
+                if (insn instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD)
+                    assertNotEquals("remainingAmount", f.name, "Retaining feedback is not order delivery");
+                if (insn instanceof MethodInsnNode m) {
+                    // The old protocol delegated final surplus to native insert. The
+                    // deferred protocol has a separate actual-acceptance flush path.
+                    if(m.owner.equals("appeng/crafting/CraftingLink")) {
+                        assertEquals("aecraftroute$releaseFeedback",method.name,
+                                "Intake and input-consumption hooks must not deliver to requester");
+                        if(m.name.equals("insert"))hasFlushDelivery=true;
+                    }
+                    if(m.name.equals("aecraftroute$setRemainingAmount"))
+                        assertEquals("aecraftroute$releaseFeedback",method.name,
+                                "Only actual delivery may reduce the outstanding order");
+                }
+            }
+            assertTrue(hasFlushDelivery,name+" must have an explicit deferred-delivery path");
         }
         var access = node(MIXIN + "AdvancedGrowthJobAccessor");
         var setter = method(access, "aecraftroute$setTasks", "(Ljava/util/Map;)V");

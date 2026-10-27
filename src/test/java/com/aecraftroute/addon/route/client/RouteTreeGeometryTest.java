@@ -21,19 +21,37 @@ class RouteTreeGeometryTest {
     }
     void assertConstraints(List<RouteTreeGeometry.Box> boxes) {
         for(var a:boxes)for(var b:boxes)if(!a.path().equals(b.path())) {
-            if(a.depth()==b.depth())assertTrue(a.x()+a.width()+16<=b.x() || b.x()+b.width()+16<=a.x());
-            if(a.depth()<b.depth())assertTrue(a.y()+a.height()+28<=b.y());
+            assertTrue(a.x()+a.width()+16<=b.x() || b.x()+b.width()+16<=a.x()
+                    || a.y()+a.height()+28<=b.y() || b.y()+b.height()+28<=a.y());
         }
     }
-    @Test void draggingAcrossPeersOrAboveParentCannotBreakBands() {
+    @Test void draggingAcrossPeersOrAboveParentCannotOverlapBoxes() {
         assertConstraints(RouteTreeGeometry.drag(tree,"root/1",-250,-400));
         assertConstraints(RouteTreeGeometry.drag(tree,"root/0",250,300));
+    }
+    @Test void legalUpAndLeftMotionSurvivesTightDefaultDepthBands() {
+        var tight=List.of(box("root",0,150,0),box("root/0",1,0,90),
+                box("root/0/0",2,0,180),box("root/1",1,250,90));
+        var moved=RouteTreeGeometry.drag(tight,"root/0",-30,-40);
+        assertEquals(-30,moved.get(1).x());assertEquals(50,moved.get(1).y());
+        assertEquals(-30,moved.get(2).x());assertEquals(140,moved.get(2).y());
+        assertEquals(tight.get(0),moved.get(0));assertEquals(tight.get(3),moved.get(3));
+        assertConstraints(moved);
     }
     @Test void collisionsMoveTheCollidingSubtreeNotJustItsRoot() {
         var initial=List.of(box("root",0,0,0),box("root/0",1,0,100),box("root/0/0",2,0,200),
                 box("root/1",1,10,100),box("root/1/0",2,10,200));
         var result=RouteTreeGeometry.constrain(initial);
         assertEquals(result.get(3).x()-10,result.get(4).x()-10);assertConstraints(result);
+    }
+    @Test void shuffledDescendantsCannotMoveAlreadyPlacedBoxesIntoOldCollisions() {
+        var shuffled=List.of(box("root/0/0",2,0,0),box("root/1/0",2,0,0),
+                box("root/0",1,0,0),box("root/1",1,0,0),box("root",0,0,0));
+        var solved=RouteTreeGeometry.constrain(shuffled);
+        assertConstraints(solved);
+        assertEquals(solved,RouteTreeGeometry.constrain(solved));
+        assertEquals(shuffled.stream().map(RouteTreeGeometry.Box::path).toList(),
+                solved.stream().map(RouteTreeGeometry.Box::path).toList());
     }
     @Test void localOffsetDoesNotDoubleApplyParentMotion() {
         var offset=RouteTreeGeometry.relative(270,340,100,200,150,100);

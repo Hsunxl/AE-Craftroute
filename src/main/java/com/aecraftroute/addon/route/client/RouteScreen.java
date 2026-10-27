@@ -145,8 +145,7 @@ public final class RouteScreen extends Screen {
             int slash=node.path.lastIndexOf('/'), hash=node.path.lastIndexOf('#');
             int slot=-1;
             if(hash>slash && hash+1<node.path.length()) try {slot=Integer.parseInt(node.path.substring(hash+1));} catch(NumberFormatException ignored) {}
-            branchEdits.hide(parent, node.material.key);
-            branchEdits.hideMaterial(node.material.key);
+            // Prune this occurrence only: another branch may need the same material.
             if(slot>=0)branchEdits.hideChild(parent,slot);
             LOGGER.info("Removed material node: path={}, key={}, parent={}, slot={}",node.path,node.material.key,parent,slot);
         } else branchEdits.collapse(node.path);
@@ -342,6 +341,7 @@ public final class RouteScreen extends Screen {
         status="已自动整理：清除手动挪动的位置，按树形重新排列并适配窗口（配方与材料不变）";
     }
     private void restoreTree() { send("restore",null,""); }
+    private void clearAppliedCanvas() { send("clearcanvas",null,""); }
     public int contentRight() { return uiLayout().contentRight(); }
     public void showRecipes(AEKey key) { if(narrow()){narrowInspector=true;buildWidgets();}jeiTab=true; if(browser!=null)browser.select(key); }
     public void expandDraft(RouteView.Draft value) {
@@ -380,6 +380,8 @@ public final class RouteScreen extends Screen {
     private EditBox itemId;
     /** Retry state for the unanswered "begin"; see {@link BeginRetryState}. */
     private final BeginRetryState beginRetry = new BeginRetryState();
+    private java.util.function.Consumer<RouteNetwork.Response> previousClientHandler;
+    private java.util.function.Consumer<RouteNetwork.Response> clientHandler;
 
     private int panelW, panelLeft, panelRight, canvasLeft, canvasRight, toolbarY, canvasTop, canvasBottom;
     private int panX, panY;
@@ -400,6 +402,10 @@ public final class RouteScreen extends Screen {
     private final List<ActionHit> actionHits = new ArrayList<>();
     private final List<SuggestionHit> suggestionHits = new ArrayList<>();
     private List<Item> suggestions = List.of();
+    private record SearchItem(Item item,String name,String id,String lowerName,String lowerId) {}
+    private List<SearchItem> searchIndex=List.of();
+    private net.minecraft.locale.Language searchLanguage;
+    private int searchRegistrySize;
     private int suggestionPage;
     private int suggestionX, suggestionY, suggestionW, suggestionH;
     private boolean suppressSuggestions;
@@ -460,7 +466,8 @@ public final class RouteScreen extends Screen {
         if(workbench==null)workbench=new RouteWorkbenchPanel((action,argument)->send(action,null,argument)!=0);
         workbench.layout(panelLeft+6,panelRight-panelLeft-14,canvasBottom,canvasLeft,canvasWidth(),canvasTop,compact(),uiLayout().collapseCache());
         buildWidgets();
-        status = target == null ? "从合成树节点按 F8，或输入物品名称设置目标" : "正在读取可用配方…";
+        status = target == null ? fromCrafting ? "正在等待合成确认页计划与服务端目标…"
+                : "从合成树节点按 F8，或输入物品名称设置目标" : "正在读取可用配方…";
         if (target != null) {
             ensureMaterial(target);
             query(target);
@@ -545,11 +552,11 @@ public final class RouteScreen extends Screen {
     }
 
     private void buildToolbar() {
-        String[] labels=fromCrafting?new String[]{"还原","撤销","清空","整理","应用","自动","库存","适应","重载"}
-                :new String[]{"撤销","清空","整理","应用","自动","库存","适应","重载"};
-        String[] tips={"还原合成树","撤销上一次画布编辑","清空手动分支，保留最终产物","自动整理（Home）：清除手动位置并适应窗口",
+        String[] labels=fromCrafting?new String[]{"还原","撤销","清空","撤画","整理","应用","自动","库存","适应","重载"}
+                :new String[]{"撤销","清空","撤画","整理","应用","自动","库存","适应","重载"};
+        String[] tips={"还原合成树","撤销上一次画布编辑","清空手动分支，保留最终产物","撤销已应用的强制画布，但保留逐材料锁定与禁用设置","自动整理（Home）：清除手动位置并适应窗口",
                 "整幅应用到合成","恢复自动路由","仅用现有库存：不再自动选配方，缺料即不可合成","适应窗口：保留手动位置","重载网络样板来源、AE 系列供应器及 JEI 配方映射；保留画布"};
-        Runnable[] actions={this::restoreTree,this::undoEdit,this::clearManual,this::autoArrange,this::applyCanvas,
+        Runnable[] actions={this::restoreTree,this::undoEdit,this::clearManual,this::clearAppliedCanvas,this::autoArrange,this::applyCanvas,
                 this::automaticSelected,this::stockSelected,this::fitView,this::reloadMappings};
         var cells=RouteToolbar.of(windowBounds().width()-16,labels.length);
         for(int i=0;i<labels.length;i++) {
@@ -566,6 +573,7 @@ public final class RouteScreen extends Screen {
         try {
             if(RouteClient.recipeBrowser!=null) {
                 var fresh=RouteClient.recipeBrowser.get();var node=activeMaterial();
+                fresh.invalidateMappings();
                 if(node!=null)fresh.select(node.material.renderKey);
                 if(selectedRecipe!=null && recipeMachineId(selectedRecipe)!=null)fresh.focusRecipe(recipeMachineId(selectedRecipe));
                 browser=fresh;
@@ -606,6 +614,19 @@ public final class RouteScreen extends Screen {
     private List<Item> searchItems(String text) {
         String query = text == null ? "" : text.trim();
         if (query.isEmpty()) return List.of();
+        var language=net.minecraft.locale.Language.getInstance();
+        if(searchIndex.isEmpty() || searchLanguage!=language || searchRegistrySize!=BuiltInRegistries.ITEM.size()) {
+            var fresh=new ArrayList<SearchItem>();
+            for(Item item:BuiltInRegistries.ITEM) {
+                if(item==Items.AIR)continue;
+                String name=new ItemStack(item).getHoverName().getString();
+                String id=BuiltInRegistries.ITEM.getKey(item).toString();
+                fresh.add(new SearchItem(item,name,id,name.toLowerCase(Locale.ROOT),id.toLowerCase(Locale.ROOT)));
+            }
+            searchIndex=List.copyOf(fresh);
+            searchLanguage=language;
+            searchRegistrySize=BuiltInRegistries.ITEM.size();
+        }
         var result = new ArrayList<Item>();
         var byId = ResourceLocation.tryParse(query);
         if (byId != null && BuiltInRegistries.ITEM.containsKey(byId)) {
@@ -613,16 +634,12 @@ public final class RouteScreen extends Screen {
         }
         String lower = query.toLowerCase(Locale.ROOT);
         var partial = new ArrayList<Item>();
-        for (Item item : BuiltInRegistries.ITEM) {
-            if (item == Items.AIR || result.contains(item)) continue;
-            var stack = new ItemStack(item);
-            String name = stack.getHoverName().getString();
-            String id = BuiltInRegistries.ITEM.getKey(item).toString();
-            if (name.equalsIgnoreCase(query) || id.equalsIgnoreCase(query)) {
-                result.add(0, item);
-            } else if (name.toLowerCase(Locale.ROOT).contains(lower)
-                    || id.toLowerCase(Locale.ROOT).contains(lower)) {
-                partial.add(item);
+        for (var entry : searchIndex) {
+            if (result.contains(entry.item())) continue;
+            if (entry.name().equalsIgnoreCase(query) || entry.id().equalsIgnoreCase(query)) {
+                result.add(0, entry.item());
+            } else if (entry.lowerName().contains(lower) || entry.lowerId().contains(lower)) {
+                partial.add(entry.item());
             }
         }
         result.addAll(partial);
@@ -779,7 +796,7 @@ public final class RouteScreen extends Screen {
         if (RouteRequestRules.mutation(action) && pending.values().stream().anyMatch(p -> RouteRequestRules.mutation(p.action))) {
             status="上一项操作尚未完成"; return 0;
         }
-        if (argument.length()>24000) { status="配方数据过大，无法编码"; return 0; }
+        if (argument.length()>com.aecraftroute.addon.route.RouteCanvasPayload.MAX_CHARACTERS) { status="配方数据过大，无法编码"; return 0; }
         int sequence = ++nextSequence;
         if(action.equals("preview") || RouteRequestRules.mutation(action)) {
             pending.entrySet().removeIf(e->e.getValue().action.equals("preview") || e.getValue().action.equals("apply"));
@@ -865,7 +882,10 @@ public final class RouteScreen extends Screen {
             manualBuild=false;branchEdits.clear();nodeMenu=false;branches.clear();branchDrafts.clear();offsets.clear();draftChoice=null;draft=null;
             centerPending=true;autoCenter=true;setFieldText(targetName(target));
         }
-        if (request.action.equals("clear") || request.action.equals("restore")) {
+        if (request.action.equals("clear") || request.action.equals("clearcanvas") || request.action.equals("restore")) {
+            if(reply.message()!=null && reply.message().startsWith("操作失败")) {status=reply.message();return;}
+            lastPreviewSignature=null;
+            acceptPlan(null);
             materials.clear();
             pending.clear();
             root = null;
@@ -957,26 +977,21 @@ public final class RouteScreen extends Screen {
     private void applyCanvas() {
         if (!canModify) { status = "请从自动合成确认界面进入修改模式"; return; }
         if (target == null) { status = "先设置最终产物，再整幅应用"; return; }
-        var nodes = new com.google.gson.JsonArray();
+        var nodes = new ArrayList<com.aecraftroute.addon.route.RouteApply.Node>();
         int skipped = 0;
         for (var node : materialNodes) {
             var choice = node.preview == null ? null : node.preview.choice();
             if (choice == null || choice.id().startsWith("plan:") || node.material.key == null) { skipped++; continue; }
-            var entry = new com.google.gson.JsonObject();
-            entry.addProperty("k", node.material.key);
-            entry.addProperty("c", choice.id());
-            entry.addProperty("n", node.material.name);
-            entry.addProperty("p", node.path);
-            nodes.add(entry);
+            nodes.add(new com.aecraftroute.addon.route.RouteApply.Node(node.material.key,choice.id(),node.material.name,node.path));
         }
         if (nodes.isEmpty()) { status = "画布上还没有可应用的配方；先展开材料并选择样板"; return; }
-        var json = new com.google.gson.JsonObject();
-        json.addProperty("amount", Math.max(1, targetAmount));
-        json.add("nodes", nodes);
+        String argument;
+        try {argument=com.aecraftroute.addon.route.RouteCanvasPayload.encode(targetAmount,nodes);}
+        catch(IllegalArgumentException tooLarge){status=tooLarge.getMessage();return;}
         status = "正在证明强制画布：" + nodes.size() + " 个路径分支（每分支至少执行画布批次）"
                 + (skipped > 0 ? "（" + skipped + " 个节点没有可应用样板）" : "")
                ;
-        send("apply", target, json.toString());
+        send("apply", target, argument);
     }
 
     private void acceptPlan(RoutePlanView value) {
@@ -1102,7 +1117,7 @@ public final class RouteScreen extends Screen {
         var planned=originalChoices.get(material.key);
         if(planned!=null && material.reply!=null) {
             for(var candidate:material.reply.choices()) {
-                if(amounts(candidate.inputs()).equals(amounts(planned.inputs())) && amounts(candidate.outputs()).equals(amounts(planned.outputs()))) {
+                if(sameAmounts(candidate,planned)) {
                     planned=candidate;break;
                 }
             }
@@ -1246,7 +1261,8 @@ public final class RouteScreen extends Screen {
     private void saveGeometryOffsets() {
         for(var node:materialNodes) {
             if(node.inlineResource)continue;
-            var parent=node.path.equals("root")?null:findByPath(node.path.substring(0,node.path.lastIndexOf('/')));
+            var parentPath=RouteGraphMath.parentPath(node.path);
+            var parent=parentPath==null?null:findByPath(parentPath);
             var delta=RouteTreeGeometry.relative(node.x,node.y,node.autoX,node.autoY,
                     parent==null?0:parent.x-parent.autoX,parent==null?0:parent.y-parent.autoY);
             if(delta[0]==0 && delta[1]==0)offsets.remove("m:"+node.path);else offsets.put("m:"+node.path,delta);
@@ -1424,6 +1440,8 @@ public final class RouteScreen extends Screen {
         boolean selected=selectedNode==node && selectedRecipe==null;
         boolean hover=inside(mx,my,sx,sy,sw,sh);
 
+        // A server proof describes the applied route, not any pending local branch. Keep
+        // the whole draft conservative until it is applied, including untouched siblings.
         var visual=RouteNodeVisual.of(plan!=null && plan.proven(),node.material.reply!=null && node.material.reply.stockOnly(),!branches.isEmpty());
         int border=node.cycle?ACCENT:selected?ACCENT:visual.frame();
         g.fill(x,y,x+node.w,y+node.h,selected?0xFFC6C6D4:hover?0xFFD8D9E0:0xFFCBCCD4);
@@ -1576,7 +1594,8 @@ public final class RouteScreen extends Screen {
 
         if(jeiTab) {
             if(browser==null) text(g,"JEI 尚未就绪",x,canvasTop+70,max,MUTED);
-            else { browser.select(node.material.renderKey);browser.demand(node.demand); browser.render(g,x,uiLayout().recipeTop(),max,uiLayout().recipeHeight(),mx,my); }
+            else { browser.select(node.material.renderKey);browser.demand(node.demand); browser.render(g,x,uiLayout().recipeTop(),max,
+                    Math.max(0,inspectorBottom()-uiLayout().recipeTop()-22),mx,my); }
             var value=branchDrafts.get(node.path);
             action(g,encodingLabel(node),x,inspectorBottom()-20,max,18,this::encodeSelected);
             return;
@@ -2171,6 +2190,11 @@ public final class RouteScreen extends Screen {
             setTargetFromField();
             return true;
         }
+        if(keyCode==GLFW.GLFW_KEY_ESCAPE && itemId!=null && itemId.isFocused()) {
+            itemId.setFocused(false);
+            suggestions=List.of();
+            return true;
+        }
         if(keyCode==GLFW.GLFW_KEY_ESCAPE) {onClose();return true;}
         return super.keyPressed(keyCode,scanCode,modifiers);
     }
@@ -2190,7 +2214,15 @@ public final class RouteScreen extends Screen {
 
     @Override
     public void onClose() {
+        if (clientHandler != null && RouteNetwork.clientHandler == clientHandler)
+            RouteNetwork.clientHandler = previousClientHandler;
         Minecraft.getInstance().setScreen(parent);
+    }
+
+    void setClientHandlers(java.util.function.Consumer<RouteNetwork.Response> previous,
+                           java.util.function.Consumer<RouteNetwork.Response> current) {
+        previousClientHandler = previous;
+        clientHandler = current;
     }
 
     /** Area where JEI can drop an item/fluid to make it the target. */
@@ -2261,11 +2293,22 @@ public final class RouteScreen extends Screen {
         }
     }
 
+    private boolean sameAmounts(RouteView.Choice left, RouteView.Choice right) {
+        try {
+            return amounts(left.inputs()).equals(amounts(right.inputs()))
+                    && amounts(left.outputs()).equals(amounts(right.outputs()));
+        } catch (RuntimeException invalid) {
+            // A stale third-party key must not crash the client reply/render path.
+            return false;
+        }
+    }
+
     private Map<AEKey, Long> amounts(List<RouteView.Stack> stacks) {
         var result = new HashMap<AEKey, Long>();
         for (var stack : stacks) {
-            result.merge(stack.decode(Minecraft.getInstance().level.registryAccess()),
-                    stack.amount(), Math::addExact);
+            var key=stack.decode(Minecraft.getInstance().level.registryAccess());
+            if(key==null)throw new IllegalArgumentException("材料数据无法读取");
+            result.merge(key,stack.amount(),Math::addExact);
         }
         return result;
     }

@@ -45,8 +45,14 @@ public final class RouteSnapshot {
                     var pattern=candidates.next();
                     try {com.aecraftroute.addon.compat.ScaledPatternCompat.validate(pattern);}
                     catch(IllegalArgumentException invalid) {throw new ProductionPlanningException(UNSUPPORTED,"样板包装无法安全解析："+invalid.getMessage());}
+                    var inputs=pattern.getInputs();
+                    var outputs=pattern.getOutputs();
+                    if(inputs==null || outputs==null)
+                        throw new ProductionPlanningException(UNSUPPORTED,"样板输入或输出为空");
                     boolean permitted=true;
-                    if(!policy.rules().isEmpty()) for(var out:pattern.getOutputs()) {
+                    if(!policy.rules().isEmpty()) for(var out:outputs) {
+                        if(out==null || out.what()==null)
+                            throw new ProductionPlanningException(UNSUPPORTED,"样板输出无材料");
                         if(!policy.filter(out.what(),List.of(pattern),p->identity(p,true)).contains(pattern)) permitted=false;
                     }
                     if(permitted) {
@@ -54,10 +60,21 @@ public final class RouteSnapshot {
                         if(policy.canvas()!=null) identity(pattern,false);
                         if(visited.add(pattern)) {
                             if(visited.size()>PATTERN_BUDGET)throw new ProductionPlanningException(LIMIT,"候选样板超过快照预算；不是缺料");
-                            for(var input:pattern.getInputs()) for(var stack:input.getPossibleInputs()) {
-                                if(stack==null)continue;queue.add(stack.what());var remaining=input.getRemainingKey(stack.what());if(remaining!=null)queue.add(remaining);
+                            for(var input:inputs) {
+                                if(input==null)throw new ProductionPlanningException(UNSUPPORTED,"样板输入为空");
+                                var possible=input.getPossibleInputs();
+                                if(possible==null)throw new ProductionPlanningException(UNSUPPORTED,"样板输入候选为空");
+                                for(var stack:possible) {
+                                    if(stack==null)continue;
+                                    if(stack.what()==null)throw new ProductionPlanningException(UNSUPPORTED,"样板输入候选无材料");
+                                    queue.add(stack.what());var remaining=input.getRemainingKey(stack.what());if(remaining!=null)queue.add(remaining);
+                                }
                             }
-                            for(var out:pattern.getOutputs()) queue.add(out.what());
+                            for(var out:outputs) {
+                                if(out==null || out.what()==null)
+                                    throw new ProductionPlanningException(UNSUPPORTED,"样板输出无材料");
+                                queue.add(out.what());
+                            }
                         }
                     }
                     RouteCanvasPlanner.check(deadline);return false;

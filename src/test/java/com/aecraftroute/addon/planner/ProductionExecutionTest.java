@@ -21,6 +21,7 @@ import static com.aecraftroute.addon.bench.BenchPatternDetails.InputSpec.returne
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -131,6 +132,19 @@ class ProductionExecutionTest {
 
     static ProductionPlanner.Step<PatternVariant> step(PatternVariant variant, long count) {
         return new ProductionPlanner.Step<>(variant, count);
+    }
+
+    @Test
+    void changedSlotLayoutInvalidatesBeforeTakingAnyCpuInventory() {
+        var pattern=new BenchPatternDetails(seed,1,List.of(of(dust,1)));
+        // A restored/third-party pattern can expose fewer slots than the certified allocation.
+        var job=new ProductionJob(plan(seed,1,Map.of(dust,2L),
+                List.of(block(1,step(variant(pattern,new GenericStack(dust,1),new GenericStack(dust,1)),1)))));
+        var inventory=new ListCraftingInventory(key->{});
+        inventory.insert(dust,2,Actionable.MODULATE);
+        assertNull(job.extract(pattern,inventory,null,new KeyCounter(),new KeyCounter()));
+        assertTrue(job.invalid());
+        assertEquals(2,inventory.list.get(dust));
     }
 
     /** A growth ring: 1 dust becomes 1 seed, 1 seed becomes 2 dust. Every intermediate is

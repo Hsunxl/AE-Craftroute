@@ -12,6 +12,8 @@ public record RoutePolicy<K>(Map<K, Rule> rules, Canvas<K> canvas) {
     }
     public RoutePolicy(Map<K,Rule> rules) { this(rules,null); }
     public boolean empty() { return rules.isEmpty() && canvas==null; }
+    /** Undo a forced canvas without deleting independent per-material route rules. */
+    public RoutePolicy<K> withoutCanvas() { return canvas==null ? this : new RoutePolicy<>(rules,null); }
     public record Rule(String locked, Set<String> banned, boolean stockOnly) {
         public Rule { banned = Set.copyOf(banned); }
         public static Rule automatic() { return new Rule(null, Set.of(), false); }

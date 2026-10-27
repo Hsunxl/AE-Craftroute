@@ -29,6 +29,7 @@ public abstract class AdvancedProductionCpuMixin implements com.aecraftroute.add
     @Shadow @Final private ListCraftingInventory inventory;
     @Shadow @Final private AdvCraftingCPU cpu;
     @Shadow private void finishJob(boolean success) { throw new AssertionError(); }
+    @Shadow public void cancel() { throw new AssertionError(); }
     @Shadow private void postChange(AEKey key) { throw new AssertionError(); }
     @Unique private ProductionJob aecraftroute$production;
     @Override public boolean aecraftroute$hasCertifiedProgram() {return aecraftroute$production!=null;}
@@ -119,6 +120,7 @@ public abstract class AdvancedProductionCpuMixin implements com.aecraftroute.add
 
     @Inject(method="tickCraftingLogic",at=@At("TAIL"))
     private void aecraftroute$deliver(IEnergyService energy,CraftingService service,CallbackInfo ci) {
+        if(aecraftroute$production!=null && aecraftroute$production.invalid()) {cancel();return;}
         aecraftroute$watchStall();
         if(aecraftroute$production==null || job==null || !aecraftroute$production.done()) return;
         var access=(AdvancedGrowthJobAccessor)(Object)job;
@@ -131,9 +133,10 @@ public abstract class AdvancedProductionCpuMixin implements com.aecraftroute.add
                 com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AdvancedAE CPU delivery pending: no {} x{} in the CPU inventory yet",key,remaining);
             return;
         }
-        long accepted=access.aecraftroute$getLink().insert(key,held,Actionable.MODULATE);
+        var link=access.aecraftroute$getLink();
+        long accepted=link.insert(key,held,Actionable.MODULATE);
         boolean toNetwork=false;
-        if(accepted<=0) {
+        if(accepted<=0 && link.isStandalone()) {
             // Player-initiated jobs carry no requester link; native AE2 semantics return the
             // finished output to the network instead of holding it inside the CPU forever.
             var grid=cpu.getGrid();
@@ -142,7 +145,7 @@ public abstract class AdvancedProductionCpuMixin implements com.aecraftroute.add
         }
         if(accepted<=0) {
             if(aecraftroute$deliveryLogs.acquire("blocked"))
-                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AdvancedAE CPU delivery blocked: neither requester nor network accepted {} x{}",key,held);
+                com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn("[AE-Craftroute] AdvancedAE CPU delivery blocked; retained {} x{} for retry",key,held);
             return;
         }
         if(com.aecraftroute.addon.config.CraftRouteConfig.isDebugLogging())
@@ -160,20 +163,32 @@ public abstract class AdvancedProductionCpuMixin implements com.aecraftroute.add
 
     @Inject(method="writeToNBT",at=@At("TAIL"))
     private void aecraftroute$save(CompoundTag tag,HolderLookup.Provider registries,CallbackInfo ci) {
-        if(aecraftroute$production!=null && job!=null) tag.put(ProductionJob.TAG,aecraftroute$production.save(registries));
-        else { tag.remove(ProductionJob.TAG); tag.remove(ProductionJob.LEGACY_TAG); }
+        if(aecraftroute$production!=null && job!=null) {
+            try {
+                tag.put(ProductionJob.TAG,aecraftroute$production.save(registries));
+                tag.remove(ProductionJob.SAVE_FAILED_TAG);
+            } catch(RuntimeException failure) {
+                tag.remove(ProductionJob.TAG); tag.remove(ProductionJob.LEGACY_TAG);
+                tag.putBoolean(ProductionJob.SAVE_FAILED_TAG,true);
+                com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Cannot persist AdvancedAE certified CPU program; saved job will be canceled on reload",failure);
+            }
+        } else { tag.remove(ProductionJob.TAG); tag.remove(ProductionJob.LEGACY_TAG); tag.remove(ProductionJob.SAVE_FAILED_TAG); }
     }
     @Inject(method="readFromNBT",at=@At("TAIL"))
     private void aecraftroute$load(CompoundTag tag,HolderLookup.Provider registries,CallbackInfo ci) {
         aecraftroute$deliveryLogs.reset();
         var savedTag=ProductionJob.savedTag(tag);
+        if(job!=null && tag.getBoolean(ProductionJob.SAVE_FAILED_TAG)) {
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] AdvancedAE certified CPU program failed to save; canceling restored job");
+            cancel(); return;
+        }
         aecraftroute$production=job!=null && savedTag!=null
                 ?ProductionJob.load(savedTag,registries,cpu.getLevel()):null;
         if(aecraftroute$production!=null) {
             var remaining=new java.util.HashMap<IPatternDetails,Long>();
             ((AdvancedGrowthJobAccessor)(Object)job).aecraftroute$getTasks().forEach((pattern,progress)->
                     remaining.put(pattern,((AdvancedGrowthTaskAccessor)progress).aecraftroute$getValue()));
-            aecraftroute$production.validateRemainingTasks(remaining);
+            if(!aecraftroute$production.validateRemainingTasks(remaining)) cancel();
         }
     }
 }

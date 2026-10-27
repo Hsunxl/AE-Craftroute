@@ -21,6 +21,11 @@ class RouteBranchEditsTest {
         var e=new RouteBranchEdits();e.hide("root/a");
         assertFalse(e.shown("root","root/a","iron"));assertTrue(e.shown("root","root/b","gold"));
     }
+    @Test void deletingOneOccurrenceKeepsSameMaterialOnOtherBranches() {
+        var e=new RouteBranchEdits();e.hide("root/0/1");
+        assertFalse(e.shown("root/0","root/0/1","iron"));
+        assertTrue(e.shown("root/2","root/2/0","iron"));
+    }
     @Test void deletingSubtreeKeepsMaterialAndOtherBranchIndependent() {
         var e=new RouteBranchEdits();e.collapse("root/a");
         assertFalse(e.expanded("root/a"));assertTrue(e.expanded("root/b"));

@@ -28,7 +28,8 @@ public final class CraftRouteConfig {
     public static final ModConfigSpec.BooleanValue SCROLL_EDITS_QUANTITY;
 
     public static boolean scrollEditsQuantity() {
-        try { return SCROLL_EDITS_QUANTITY.get(); } catch (IllegalStateException e) { return false; }
+        try { return SCROLL_EDITS_QUANTITY.get(); }
+        catch (IllegalStateException | NullPointerException unavailable) { return false; }
     }
 
     static {
@@ -49,7 +50,9 @@ public final class CraftRouteConfig {
                         "实际上只是输出额外的调试信息，不影响性能（未启用时跳过日志调用，几乎零开销）。")
                 .define("debugLogging", false);
 
-        SCROLL_EDITS_QUANTITY = builder.comment("Legacy canvas wheel: quantity over nodes, Ctrl to zoom. Default false.")
+        SCROLL_EDITS_QUANTITY = builder.comment(
+                        "旧版画布滚轮模式：悬停节点时调数量，按 Ctrl 缩放。默认 false。",
+                        "Legacy canvas wheel: quantity over nodes, Ctrl to zoom. Default false.")
                 .define("scrollEditsQuantity", false);
 
         COMMON_SPEC = builder.build();

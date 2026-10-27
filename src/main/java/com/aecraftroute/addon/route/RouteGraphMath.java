@@ -11,9 +11,27 @@ import java.util.List;
  */
 public final class RouteGraphMath {
     private RouteGraphMath() {}
+    /** Maximum number of child segments accepted by both the UI and server. */
+    public static final int MAX_PATH_DEPTH = 24;
+    private static final java.util.regex.Pattern VALID_PATH = java.util.regex.Pattern.compile(
+            "root(?:/[0-9]{1,3}){0," + MAX_PATH_DEPTH + "}");
+    private static final java.util.regex.Pattern EXTENDABLE_PATH = java.util.regex.Pattern.compile(
+            "root(?:/[0-9]{1,3}){0," + (MAX_PATH_DEPTH - 1) + "}");
+    public static boolean validPath(String path) {
+        return path != null && VALID_PATH.matcher(path).matches();
+    }
+    public static boolean canExtendPath(String path) {
+        return path!=null && EXTENDABLE_PATH.matcher(path).matches();
+    }
+    /** Defensive parent lookup for restored or foreign UI nodes. */
+    public static String parentPath(String path) {
+        if(path==null)return null;
+        int slash=path.lastIndexOf('/');
+        return slash<0?null:path.substring(0,slash);
+    }
     /** v3 path protocol shared by canvas expansion, ingredient drops and server proof. */
     public static String childPath(String parent,int inputGroup) {
-        if(parent==null || !parent.matches("root(?:/[0-9]{1,3}){0,23}") || inputGroup<0 || inputGroup>999)
+        if(!canExtendPath(parent) || inputGroup<0 || inputGroup>999)
             throw new IllegalArgumentException("Invalid canvas child path");
         return parent+"/"+inputGroup;
     }

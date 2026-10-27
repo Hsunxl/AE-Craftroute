@@ -27,6 +27,15 @@ class RoutePayloadTest {
             assertEquals(target,restored.requestTarget());assertEquals(canvas,restored.canvas());
         } finally {b.release();}
     }
+    @Test void olderReplyWithoutCollectionsCannotCrashCanvasConsumers() {
+        var restored=RouteNetwork.GSON.fromJson("{\"message\":\"旧回包\",\"ruleCount\":0}",RouteView.Reply.class);
+        assertNotNull(restored);
+        assertTrue(restored.choices().isEmpty());
+        assertTrue(restored.banned().isEmpty());
+        var constructed=new RouteView.Reply("missing lists",null,null,null,false,0,false);
+        assertTrue(constructed.choices().isEmpty());
+        assertTrue(constructed.banned().isEmpty());
+    }
     @Test void rejectsOversizedAction(){var b=buffer();try{assertThrows(RuntimeException.class,()->RouteNetwork.Request.CODEC.encode(b,new RouteNetwork.Request(1,1,"x".repeat(17),null,"")));}finally{b.release();}}
     @Test void rejectsOversizedFingerprint(){var b=buffer();try{assertThrows(RuntimeException.class,()->RouteNetwork.Request.CODEC.encode(b,new RouteNetwork.Request(1,1,"lock",null,"x".repeat(129))));}finally{b.release();}}
     @Test void encodingHasSeparateBoundedPayload() {

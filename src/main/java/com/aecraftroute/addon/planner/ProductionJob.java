@@ -24,6 +24,11 @@ public final class ProductionJob {
      * discards the work of every running CPU while its materials stay consumed.
      */
     public static final String LEGACY_TAG="ae2vmProductionV1";
+    public static final String SAVE_FAILED_TAG="aecraftrouteProductionSaveFailed";
+    private static final int MAX_BLOCKS=120_000;
+    // A steady-state macro may concatenate up to eight planner windows, so 16 is too small.
+    private static final int MAX_WORD_STEPS=8_192;
+    private static final int MAX_TOTAL_STEPS=120_000;
 
     /** The saved program under either key, or null when this CPU holds none. */
     public static CompoundTag savedTag(net.minecraft.nbt.CompoundTag tag) {
@@ -39,18 +44,7 @@ public final class ProductionJob {
     }
     private ProductionJob(ProductionCursor<PatternVariant> cursor,boolean invalid) { this.cursor=cursor; this.invalid=invalid; }
     public boolean done() { return !invalid && cursor.done(); }
-    /** Legacy conservative gate retained for callers of older versions. Internal
-     * delivery uses deliverableAmount: estimates are not a completion condition.
-     * Delivery may start once the program is finished AND no expected return of the
-     * target itself is still in flight. Returns of any other key - byproducts, catalysts
-     * the machine consumed, containers a provider voided - must NOT be waited for: a
-     * single return that never arrives would otherwise pin the CPU forever. Those
-     * leftovers simply stay in the CPU inventory and native storeItems returns them to
-     * the network when the job ends.
-     */
-    public boolean readyToDeliver(KeyCounter waitingFor,AEKey target) {
-        return target!=null && done() && waitingFor.get(target)==0L;
-    }
+    public boolean invalid() { return invalid; }
     /** Actual terminal surplus, never an estimated-output or progress-percentage
      * shortcut. Preserve the target's original working seed even if a machine
      * underproduces. Partial acceptance can retry without losing seed or output. */
@@ -119,9 +113,18 @@ public final class ProductionJob {
     public KeyCounter[] extract(IPatternDetails p,ICraftingInventory inventory,Level level,KeyCounter outputs,KeyCounter containers) {
         if(!allows(p)) return null;
         var variant=cursor.current(); var slots=variant.slots();
+        var patternInputs=p.getInputs();
+        var patternOutputs=p.getOutputs();
+        if(patternInputs==null || patternInputs.length!=slots.size()
+                || Arrays.stream(patternInputs).anyMatch(Objects::isNull)
+                || patternOutputs==null || patternOutputs.stream().anyMatch(out->out==null || out.what()==null)) {
+            invalid=true;
+            com.aecraftroute.addon.CraftRouteAddon.LOGGER.error("[AE-Craftroute] Certified pattern inputs or outputs changed before dispatch; cancel and resubmit. No inventory mutation.");
+            return null;
+        }
         var extracted=new KeyCounter[slots.size()];
         for(int i=0;i<slots.size();i++) {
-            extracted[i]=new KeyCounter(); var input=p.getInputs()[i];
+            extracted[i]=new KeyCounter(); var input=patternInputs[i];
             for(var portion:slots.get(i).portions()) {
                 var stack=portion.template(); long count=Math.multiplyExact(stack.amount(),portion.multiplier());
                 if(!input.isValid(stack.what(),level) || inventory.extract(stack.what(),count,Actionable.SIMULATE)<count) {
@@ -132,9 +135,9 @@ public final class ProductionJob {
                 if(got!=count) { CraftingCpuHelper.reinjectPatternInputs(inventory,extracted); return null; }
             }
         }
-        for(var out:p.getOutputs()) outputs.add(out.what(),out.amount());
+        for(var out:patternOutputs) outputs.add(out.what(),out.amount());
         for(int i=0;i<slots.size();i++) for(var portion:slots.get(i).portions()) {
-            var remaining=p.getInputs()[i].getRemainingKey(portion.template().what());
+            var remaining=patternInputs[i].getRemainingKey(portion.template().what());
             if(remaining!=null) containers.add(remaining,portion.multiplier());
         }
         return extracted;
@@ -146,6 +149,14 @@ public final class ProductionJob {
             java.util.function.Function<GenericStack,CompoundTag> encodeStack) {
         var tag=new CompoundTag(); tag.putBoolean("invalid",invalid);
         var blocks=new ListTag();
+        if(cursor.program().size()>MAX_BLOCKS) throw new IllegalArgumentException("Production program has too many blocks");
+        long totalSteps=0;
+        for(var block:cursor.program()) {
+            if(block.word().isEmpty() || block.word().size()>MAX_WORD_STEPS)
+                throw new IllegalArgumentException("Production word exceeds persistence limit");
+            totalSteps+=block.word().size();
+            if(totalSteps>MAX_TOTAL_STEPS)throw new IllegalArgumentException("Production program has too many steps");
+        }
         for(var block:cursor.program()) {
             var b=new CompoundTag(); b.putLong("repeat",block.repetitions()); var steps=new ListTag();
             for(var step:block.word()) {
@@ -187,10 +198,16 @@ public final class ProductionJob {
             if(tag.getBoolean("invalid")) throw new IllegalArgumentException("Previously invalid schedule");
             var program=new ArrayList<ProductionPlanner.Block<PatternVariant>>();
             var blocks=tag.getList("blocks",Tag.TAG_COMPOUND);
-            if(blocks.isEmpty() || blocks.size()>120_000) throw new IllegalArgumentException("Invalid program size");
+            if(blocks.isEmpty() || blocks.size()>MAX_BLOCKS) throw new IllegalArgumentException("Invalid program size");
+            long totalSteps=0;
+            for(int b=0;b<blocks.size();b++) {
+                var steps=blocks.getCompound(b).getList("steps",Tag.TAG_COMPOUND);
+                if(steps.isEmpty() || steps.size()>MAX_WORD_STEPS)throw new IllegalArgumentException("Invalid word size");
+                totalSteps+=steps.size();
+                if(totalSteps>MAX_TOTAL_STEPS)throw new IllegalArgumentException("Production program has too many steps");
+            }
             for(int b=0;b<blocks.size();b++) {
                 var data=blocks.getCompound(b); var steps=data.getList("steps",Tag.TAG_COMPOUND);
-                if(steps.isEmpty() || steps.size()>16) throw new IllegalArgumentException("Invalid word size");
                 var word=new ArrayList<ProductionPlanner.Step<PatternVariant>>();
                 for(int s=0;s<steps.size();s++) {
                     var entry=steps.getCompound(s); var pattern=com.aecraftroute.addon.compat.ScaledPatternCompat.decode(entry.getCompound("pattern"),decodePattern,level);
@@ -199,7 +216,7 @@ public final class ProductionJob {
                     if(encoded.size()!=pattern.getInputs().length) throw new IllegalArgumentException("Pattern slots changed");
                     var currentOutputs=new ListTag();
                     for(var output:pattern.getOutputs()) currentOutputs.add(encodeStack.apply(output));
-                    if(!currentOutputs.equals(entry.getList("outputs",Tag.TAG_COMPOUND))) throw new IllegalArgumentException("Pattern outputs changed");
+                    if(!sameOutputs(currentOutputs,entry.getList("outputs",Tag.TAG_COMPOUND))) throw new IllegalArgumentException("Pattern outputs changed");
                     for(int i=0;i<encoded.size();i++) {
                         var portions=encoded.getCompound(i).getList("portions",Tag.TAG_COMPOUND);
                         var allocation=new ArrayList<PatternVariant.Portion>();
@@ -211,7 +228,7 @@ public final class ProductionJob {
                     }
                     var variant=new PatternVariant(pattern,slots);
                     variant.recipe(); // Revalidate multiplier and template membership.
-                    if(!flow(variant,encodeStack).equals(entry.getCompound("flow")))
+                    if(!sameFlow(flow(variant,encodeStack),entry.getCompound("flow")))
                         throw new IllegalArgumentException("Pattern consumption or container returns changed");
                     word.add(new ProductionPlanner.Step<>(new PatternVariant(pattern,slots),entry.getLong("count")));
                 }
@@ -230,6 +247,23 @@ public final class ProductionJob {
         recipe.inputs().forEach((key,count)->inputs.add(encode.apply(new GenericStack(key,count))));
         recipe.outputs().forEach((key,count)->outputs.add(encode.apply(new GenericStack(key,count))));
         tag.put("inputs",inputs); tag.put("outputs",outputs); return tag;
+    }
+
+    /** Output order is display-only; quantity and duplicate multiplicity are not. */
+    private static boolean sameOutputs(ListTag current,ListTag saved) {
+        if(current.size()!=saved.size())return false;
+        var counts=new HashMap<Tag,Integer>();
+        for(var output:current)counts.merge(output,1,Integer::sum);
+        for(var output:saved) {
+            var left=counts.get(output);
+            if(left==null)return false;
+            if(left==1)counts.remove(output);else counts.put(output,left-1);
+        }
+        return counts.isEmpty();
+    }
+    private static boolean sameFlow(CompoundTag current,CompoundTag saved) {
+        return sameOutputs(current.getList("inputs",Tag.TAG_COMPOUND),saved.getList("inputs",Tag.TAG_COMPOUND))
+                && sameOutputs(current.getList("outputs",Tag.TAG_COMPOUND),saved.getList("outputs",Tag.TAG_COMPOUND));
     }
 
 }

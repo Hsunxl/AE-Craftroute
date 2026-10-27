@@ -30,13 +30,20 @@ public final class TwoNodeGrowthPlanner {
     private TwoNodeGrowthPlanner() {
     }
 
+    private static appeng.api.stacks.GenericStack primary(IPatternDetails pattern) {
+        if(pattern==null || pattern.getOutputs()==null || pattern.getOutputs().isEmpty())return null;
+        var output=pattern.getPrimaryOutput();
+        return output==null || output.what()==null || output.amount()<=0?null:output;
+    }
+
     private static Line line(IPatternDetails p) {
         if (p == null || p.getOutputs() == null || p.getOutputs().size() != 1) return null;
-        var out = p.getPrimaryOutput();
-        if (out == null || out.what() == null || out.amount() <= 0) return null;
+        var out = primary(p);
+        if (out == null) return null;
         Map<AEKey, Long> inputs = new LinkedHashMap<>();
         if (p.getInputs() == null) return null;
         for (var in : p.getInputs()) {
+            if(in==null)return null;
             var choices = in.getPossibleInputs();
             // A crafting pattern with canSubstitute=true may expose an entire tag.
             // Account conservatively for the encoded primary, which is an actual
@@ -71,7 +78,8 @@ public final class TwoNodeGrowthPlanner {
     public static boolean containsRing(Collection<IPatternDetails> patterns) {
         Map<AEKey, IPatternDetails> byOutput = new HashMap<>();
         for (var p : patterns) {
-            if (p != null && p.getPrimaryOutput() != null) byOutput.put(p.getPrimaryOutput().what(), p);
+            var output=primary(p);
+            if(output!=null)byOutput.put(output.what(),p);
         }
         try {
             for (var p : patterns) {
@@ -86,13 +94,17 @@ public final class TwoNodeGrowthPlanner {
     /** Recyclers must dispatch before ordinary consumers of their feedback key. */
     public static Map<IPatternDetails, ?> prioritizeFeedback(Map<IPatternDetails, ?> tasks) {
         Map<AEKey, IPatternDetails> byOutput = new HashMap<>();
-        tasks.keySet().forEach(p -> byOutput.put(p.getPrimaryOutput().what(), p));
+        tasks.keySet().forEach(p -> {var output=primary(p);if(output!=null)byOutput.put(output.what(),p);});
         Map<IPatternDetails, Object> ordered = new LinkedHashMap<>();
-        for (var p : tasks.keySet()) {
-            Ring r = find(p, byOutput::get);
-            if (r != null && tasks.containsKey(r.recycle.pattern)) {
-                ordered.put(r.recycle.pattern, tasks.get(r.recycle.pattern));
+        try {
+            for (var p : tasks.keySet()) {
+                Ring r = find(p, byOutput::get);
+                if (r != null && tasks.containsKey(r.recycle.pattern)) {
+                    ordered.put(r.recycle.pattern, tasks.get(r.recycle.pattern));
+                }
             }
+        } catch(ArithmeticException unsupported) {
+            return tasks; // No partial reordering when the ring cannot be modelled.
         }
         tasks.forEach(ordered::put);
         return ordered;

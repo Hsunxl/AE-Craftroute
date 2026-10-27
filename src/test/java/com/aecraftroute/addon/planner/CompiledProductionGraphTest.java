@@ -98,6 +98,23 @@ class CompiledProductionGraphTest {
         var third=plan(changed,ore,out,60,8);assertEquals(24,third.usedItems().get(ore));
         assertEquals(10,original.usedItems().get(ore));assertEquals(1,active.position().completed());
     }
+    @Test void isomorphicNumericFlowsMayReuseCompilationAcrossDifferentKeys() {
+        var shared=compile(1,0);
+        assertSame(shared,compile(1,0));
+        var firstOre=BenchAEKey.of("compile_identity_ore_a");
+        var firstOut=BenchAEKey.of("compile_identity_out_a");
+        var secondOre=BenchAEKey.of("compile_identity_ore_b");
+        var secondOut=BenchAEKey.of("compile_identity_out_b");
+        var firstPattern=new BenchPatternDetails(firstOut,1,List.of(of(firstOre,1)));
+        var secondPattern=new BenchPatternDetails(secondOut,1,List.of(of(secondOre,1)));
+        var first=plan(firstPattern,firstOre,firstOut,5,3);
+        var second=plan(secondPattern,secondOre,secondOut,5,3);
+        assertEquals(3,first.patternTimes().get(firstPattern));
+        assertEquals(3,second.patternTimes().get(secondPattern));
+        assertEquals(0,second.usedItems().get(firstOre));
+        assertEquals(3,second.usedItems().get(secondOre));
+        assertSame(secondPattern,second.program().getFirst().word().getFirst().recipe().pattern());
+    }
     @Test void cachedCompilationDoesNotCacheCatalystAvailabilityOrRemovedProducers() {
         var ore=BenchAEKey.of("compile_seed_ore");var out=BenchAEKey.of("compile_seed_out");var tool=BenchAEKey.of("compile_seed_tool");
         var pattern=new BenchPatternDetails(out,1,List.of(of(ore,1),returned(tool,1)));

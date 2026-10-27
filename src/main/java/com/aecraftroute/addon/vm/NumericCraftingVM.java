@@ -48,6 +48,8 @@ public final class NumericCraftingVM {
         Step step = null;
         for (int pc = program.entry(recipe); ; pc++) {
             if (expired.getAsBoolean()) return failed(Status.TIMED_OUT);
+            if (pc < 0 || pc >= program.instructionCount())
+                throw new IllegalStateException("Numeric program counter out of bounds: " + pc);
             int key = program.operand(pc, 0);
             switch (program.opcode(pc)) {
                 case CHECK_PREFIX -> {
@@ -58,7 +60,8 @@ public final class NumericCraftingVM {
                 }
                 case LIMIT_OUTPUT -> {
                     long delta = program.constant(program.operand(pc, 1));
-                    count = Math.min(count, (Long.MAX_VALUE - working[key]) / delta);
+                    if (delta < 0) throw new IllegalStateException("Negative output limit");
+                    if (delta > 0) count = Math.min(count, (Long.MAX_VALUE - working[key]) / delta);
                     if (count == 0) return failed(Status.BLOCKED);
                 }
                 case APPLY_DELTA -> {

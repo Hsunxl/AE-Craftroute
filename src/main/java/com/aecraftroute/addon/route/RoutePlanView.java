@@ -91,8 +91,9 @@ public record RoutePlanView(String verdict, String message, long bytes, long amo
 
     private static String name(IPatternDetails pattern) {
         var outputs = pattern.getOutputs();
-        if (outputs.isEmpty()) return "样板";
+        if (outputs == null || outputs.isEmpty()) return "样板";
         var primary = outputs.get(0);
+        if (primary == null) return "样板";
         String label;
         try {
             label = primary.what() == null ? "样板" : primary.what().getDisplayName().getString();

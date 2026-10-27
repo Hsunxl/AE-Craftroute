@@ -1,6 +1,7 @@
 package com.aecraftroute.addon.route;
 
 import net.minecraft.nbt.CompoundTag;
+import java.util.function.Predicate;
 
 /** Persistent buffer bookkeeping without player/world initialization. Never stores client-supplied item contents. */
 final class RouteCacheData {
@@ -17,6 +18,13 @@ final class RouteCacheData {
         var entry=cache.getCompound(Integer.toString(slot));
         RouteTransferRules.validateToken(slot,SIZE,token,entry.getString("token"));
         return entry;
+    }
+    static void discardUnreadable(CompoundTag cache,int slot,long revision,Predicate<CompoundTag> readable) {
+        if(slot<0 || slot>=SIZE || cache.getLong("revision")!=revision || !cache.contains(Integer.toString(slot)))
+            throw new IllegalArgumentException("缓存槽已变化，请刷新后重试");
+        if(readable.test(cache.getCompound(Integer.toString(slot))))
+            throw new IllegalArgumentException("样板仍可读取，请使用放入背包，不允许清理");
+        cache.remove(Integer.toString(slot));
     }
     static void commit(CompoundTag playerData,CompoundTag cache) {
         cache.putLong("revision",cache.getLong("revision")+1);

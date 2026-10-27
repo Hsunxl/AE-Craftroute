@@ -24,14 +24,28 @@ public final class RoutePlanningService {
     private static final long SLOW_REQUEST_NANOS=500_000_000L;
     private enum Phase { CAPTURE("capture"), WORKER_QUEUE("worker queue"), WORKER_COMPUTE("worker computation"), VALIDATION("validation"), COMPLETE("complete");
         final String label; Phase(String label){this.label=label;} }
-    private static final ThreadPoolExecutor WORKERS=new ThreadPoolExecutor(2,2,30,TimeUnit.SECONDS,
-            new ArrayBlockingQueue<>(8),r->{var t=new Thread(r,"aecraftroute-route-plan");t.setDaemon(true);return t;},new ThreadPoolExecutor.AbortPolicy());
+    private static volatile ThreadPoolExecutor workers;
+    private static synchronized ThreadPoolExecutor workers() {
+        if(workers==null) workers=new ThreadPoolExecutor(2,2,30,TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(8),r->{var t=new Thread(r,"aecraftroute-route-plan");t.setDaemon(true);return t;},
+                new ThreadPoolExecutor.AbortPolicy());
+        return workers;
+    }
+    private static synchronized void shutdownWorkers() {
+        var old=workers;workers=null;
+        if(old!=null)old.shutdownNow();
+    }
     private static final List<Job> JOBS=new ArrayList<>();
     interface CaptureWork {
         boolean advance();
         RouteSnapshot.Result result();
         void validate(long deadline,long validationEnd,CertifiedCraftingPlan plan);
         default boolean refresh(AEKey target){return false;}
+    }
+    private static final class ValidationSliceExpired extends RuntimeException {}
+    static void checkValidationBudget(long deadline,long validationEnd) {
+        RouteCanvasPlanner.check(deadline);
+        if(System.nanoTime()>=validationEnd)throw new ValidationSliceExpired();
     }
     private static final class LiveCapture implements CaptureWork {
         RouteSnapshot.Capture source;
@@ -44,7 +58,7 @@ public final class RoutePlanningService {
             var entries=source.validation();
             while(entries.hasNext()) {
                 if(!source.unchanged(entries.next()))throw new ProductionPlanningException(INVALID,"网络样板已变化；旧计划已丢弃，请重试");
-                RouteCanvasPlanner.check(validationEnd);
+                checkValidationBudget(deadline,validationEnd);
             }
             // The proof needs executable inputs, not a frozen network. Stock changes in
             // unrelated parts of a busy ATM10 grid must not invalidate an otherwise valid
@@ -55,8 +69,9 @@ public final class RoutePlanningService {
                 long available=Math.max(0,live.get(entry.getKey()));
                 if(needed>0 && available<needed)
                     throw ProductionPlanningException.startupStockChanged(entry.getKey(),needed,available);
-                RouteCanvasPlanner.check(validationEnd);
+                checkValidationBudget(deadline,validationEnd);
             }
+            checkValidationBudget(deadline,validationEnd);
         }
     }
     /** Conservative cross-request fast path inspired by upstream AE2-VM tryFastPath: a repeated
@@ -111,12 +126,13 @@ public final class RoutePlanningService {
         private boolean diagnosticLogged;
         private static final int MAX_STOCK_REPLANS=2;
         int stockReplans;
+        private int validationSliceRetries;
         private final Set<AEKey> unstableStock=new LinkedHashSet<>();
         private long priorQueueNanos,priorComputeNanos;
         final CompletableFuture<CertifiedCraftingPlan> result=new CompletableFuture<>();
         volatile Future<?> worker; volatile CertifiedCraftingPlan plan; volatile Throwable error; volatile boolean finished;
         Job(IGrid grid,RoutePolicy<AEKey> policy,HolderLookup.Provider registries,AEKey key,long amount,ProductionPlanner.Limits limits,BooleanSupplier valid) {
-            this(grid,policy,key,amount,limits,valid,WORKERS,null);
+            this(grid,policy,key,amount,limits,valid,workers(),null);
             captureSource=new LiveCapture(new RouteSnapshot.Capture(grid,policy,registries,key,deadline));
         }
         private CaptureWork captureSource;
@@ -181,6 +197,15 @@ public final class RoutePlanningService {
                     long validationEnd=Math.min(deadline,System.nanoTime()+SLICE_NANOS);
                     phase=Phase.VALIDATION;long validationStart=System.nanoTime();
                     try {capture().validate(deadline,validationEnd,plan);}
+                    catch(ValidationSliceExpired expired) {
+                        // Cold class loading or a transient server stall must not be confused
+                        // with exhausting the whole request. Restart the ENTIRE authoritative
+                        // check next tick, never trusting a previously validated prefix.
+                        RouteCanvasPlanner.check(deadline);
+                        if(validationSliceRetries++>=2)
+                            throw new ProductionPlanningException(LIMIT,"提交前完整复核连续超过单次切片预算；不是缺料");
+                        return;
+                    }
                     catch(ProductionPlanningException changed) {
                         if(changed.stockDeficit()==null || stockReplans>=MAX_STOCK_REPLANS)throw changed;
                         RouteCanvasPlanner.check(deadline);
@@ -275,7 +300,9 @@ public final class RoutePlanningService {
         return planFrozen(snapshot,policy,key,amount,new ProductionPlanner.Limits(states,RouteCanvasPlanner.remaining(deadline)));
     }
     @SubscribeEvent public static void tick(ServerTickEvent.Post event) {
-        tickJobs(JOBS,System.nanoTime()+TICK_NANOS);WORKERS.purge();
+        tickJobs(JOBS,System.nanoTime()+TICK_NANOS);
+        var active=workers;
+        if(active!=null)active.purge();
     }
     /** Production tick/stop logic, shared without replacing the actual scheduling implementation. */
     static void tickJobs(List<Job> jobs,long end) {
@@ -288,6 +315,8 @@ public final class RoutePlanningService {
     static void cancelJobs(List<Job> jobs) {
         var old=new ArrayList<>(jobs);jobs.clear();for(var j:old)j.result.cancel(true);
     }
-    @SubscribeEvent public static void stopped(ServerStoppedEvent event) {cancelJobs(JOBS);clearReuse();NetworkProductionPlanner.clearPlanningCaches();WORKERS.purge();}
+    @SubscribeEvent public static void stopped(ServerStoppedEvent event) {
+        cancelJobs(JOBS);shutdownWorkers();clearReuse();NetworkProductionPlanner.clearPlanningCaches();
+    }
     private RoutePlanningService() {}
 }

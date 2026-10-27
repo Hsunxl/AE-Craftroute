@@ -70,6 +70,19 @@ dependencies {
     def advancedaeJar = providers.gradleProperty('advancedaeJar').getOrElse('../../../mods/AdvancedAE-1.6.12-1.21.1.jar')
     compileOnly files(advancedaeJar)
     testRuntimeOnly files(advancedaeJar)
+    // Exercise the installed scaled-pattern wrapper contract, not only test doubles.
+    testRuntimeOnly files('../../../mods/extendedae_plus-1.6.3.jar')
+    // Opt-in isolated verification of the installed NeoECO + AdvancedAE mixin combination.
+    if (providers.gradleProperty('neoEcoSelftest').isPresent()) {
+        runtimeOnly files('../../../mods/neoecoae-21.2.2.jar')
+        runtimeOnly files('../../../mods/ldlib2-neoforge-1.21.1-2.2.42-all.jar')
+    }
+    if (providers.gradleProperty('extendedAePlusSelftest').isPresent()) {
+        runtimeOnly files('../../../mods/ExtendedAE-1.21-2.2.41-neoforge.jar')
+        runtimeOnly files('../../../mods/extendedae_plus-1.6.3.jar')
+        runtimeOnly files('../../../mods/Glodium-1.21-2.2-neoforge.jar')
+        runtimeOnly files('../../../mods/ae2wtlib-19.5.1.jar')
+    }
     // Independent verification instance: AdvancedAE and AE2's guideme dependency must be
     // loadable at runtime for the dedicated-server selftest.
     runtimeOnly files(advancedaeJar)
@@ -111,6 +124,37 @@ afterEvaluate {
     sourceSets.test.runtimeClasspath += sourceSets.main.runtimeClasspath
 }
 tasks.named('compileTestJava') { dependsOn 'createMinecraftArtifacts' }
+
+// Minecraft normally exits zero even when the harness logs RESULT=FAIL. Require a
+// fresh, exact result receipt so failed assertions or early exits cannot look green.
+def selftestReceipt = layout.projectDirectory.file('run-selftest/selftest-result.txt').asFile
+def selectedSelftestTask = providers.gradleProperty('selftestTask').getOrElse('growth')
+def expectedSelftestResult = 'PASS task=' + selectedSelftestTask
+  def supportedSelftestTasks = ['growth', 'cancel', 'reload', 'restart1', 'restart2', 'advanced-restart1', 'advanced-restart2',
+    'paths', 'vanilla', 'vanilla-canvas', 'vanilla-canvas-advanced', 'scaled-advanced', 'planning-load',
+    'scaled-native-plan', 'scaled-processing-execution', 'scaled-processing-plain-execution', 'scaled-strict-roundtrip', 'scaled-molecular-execution',
+    'foreign', 'foreign-advanced', 'foreign-advanced-plus',
+    'fallback', 'fallback-small', 'fallback-busy', 'partial', 'overestimate',
+    'advanced', 'advanced-overestimate', 'stock-race', 'advanced-stock-race',
+    'rejectonce', 'legacy-feedback', 'legacy-feedback-advanced', 'legacy-feedback-control',
+    'legacy-feedback-reload', 'legacy-feedback-advanced-reload',
+    'legacy-feedback-restart1', 'legacy-feedback-restart2',
+    'legacy-feedback-advanced-restart1', 'legacy-feedback-advanced-restart2',
+    'legacy-feedback-seed-rejectonce', 'legacy-feedback-advanced-seed-rejectonce',
+    'legacy-feedback-corrupt', 'legacy-feedback-advanced-corrupt', 'gate-failure']
+tasks.named('runSelftestServer') {
+    doFirst {
+        // Reject typos before starting Minecraft (whose harness resets its test world).
+        if (!supportedSelftestTasks.contains(selectedSelftestTask))
+            throw new GradleException('Unknown selftest task: ' + selectedSelftestTask)
+        if (selftestReceipt.exists() && !selftestReceipt.delete())
+            throw new GradleException('Cannot remove stale selftest result receipt')
+    }
+    doLast {
+        if (!selftestReceipt.isFile() || selftestReceipt.getText('UTF-8').trim() != expectedSelftestResult)
+            throw new GradleException('Selftest failed or did not finish: expected ' + expectedSelftestResult)
+    }
+}
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'

@@ -40,6 +40,55 @@ class ProductionPersistenceTest {
         }
         job=load(binary(save(job)),p); assertTrue(job.done()); assertFalse(job.allows(p));
     }
+    @Test void steadyStateWordLongerThanSixteenStepsSurvivesRestart() throws Exception {
+        var p=pattern(true);
+        var variant=ProductionExecutionTest.variant(p,new GenericStack(tool,1),new GenericStack(fuel,1));
+        var word=new ArrayList<ProductionPlanner.Step<PatternVariant>>();
+        for(int i=0;i<17;i++) word.add(new ProductionPlanner.Step<>(variant,1));
+        var program=List.of(new ProductionPlanner.Block<>(word,1));
+        var used=new KeyCounter();used.add(tool,1);used.add(fuel,17);
+        var plan=new CertifiedCraftingPlan(new GenericStack(target,17),256,used,Map.of(p,17L),program);
+        var restored=load(binary(save(new ProductionJob(plan))),p);
+        assertTrue(restored.validateRemainingTasks(Map.of(p,17L)));
+        for(int i=0;i<17;i++) {assertTrue(restored.allows(p));restored.accepted(p);}
+        assertTrue(restored.done());
+    }
+    @Test void outputDisplayOrderChangeDoesNotCancelAnOtherwiseIdenticalProgram() {
+        var a=BenchAEKey.of("persist_byproduct_a");
+        var b=BenchAEKey.of("persist_byproduct_b");
+        var inputs=List.of(returned(tool,1),of(fuel,1));
+        var original=new BenchPatternDetails(target,1,inputs,List.of(
+                BenchPatternDetails.OutputSpec.of(a,1),BenchPatternDetails.OutputSpec.of(b,2)));
+        var reordered=new BenchPatternDetails(target,1,inputs,List.of(
+                BenchPatternDetails.OutputSpec.of(b,2),BenchPatternDetails.OutputSpec.of(a,1)));
+        var restored=load(save(job(original)),reordered);
+        assertTrue(restored.allows(reordered));
+        assertTrue(restored.validateRemainingTasks(Map.of(reordered,20L)));
+    }
+    @Test void aggregateStepLimitRejectsHugeSavedAndRestoredProgramsBeforeDecoding() {
+        var p=pattern(true);
+        var variant=ProductionExecutionTest.variant(p,new GenericStack(tool,1),new GenericStack(fuel,1));
+        var step=new ProductionPlanner.Step<>(variant,1);
+        var word=Collections.nCopies(8192,step);
+        var block=new ProductionPlanner.Block<>(word,1);
+        var program=Collections.nCopies(15,block); // 122,880 steps, each word individually legal.
+        var plan=new CertifiedCraftingPlan(new GenericStack(target,1),256,new KeyCounter(),Map.of(p,122_880L),program);
+        assertThrows(IllegalArgumentException.class,()->save(new ProductionJob(plan)));
+
+        var stored=save(job(p));
+        var first=stored.getList("blocks",Tag.TAG_COMPOUND).getCompound(0);
+        var encodedStep=first.getList("steps",Tag.TAG_COMPOUND).getCompound(0);
+        var manySteps=new ListTag();
+        for(int i=0;i<8192;i++)manySteps.add(encodedStep);
+        var manyBlocks=new ListTag();
+        for(int i=0;i<15;i++) {
+            var encodedBlock=new CompoundTag();encodedBlock.putLong("repeat",1);encodedBlock.put("steps",manySteps);
+            manyBlocks.add(encodedBlock);
+        }
+        stored.put("blocks",manyBlocks);
+        var loaded=load(stored,p);
+        assertFalse(loaded.allows(p));
+    }
     @Test void reboundCachedProofRestoresWithoutTheInMemoryCache() throws Exception {
         NetworkProductionPlanner.clearCache();
         job(pattern(true));

@@ -28,6 +28,15 @@ class RoutePatternPresentationTest {
         assertNotNull(old.sources());assertTrue(old.sources().isEmpty());
         assertTrue(new RouteView.Choice("a",List.of(),List.of(),false).sources().isEmpty());
     }
+    @Test void omittedIngredientListsFromOlderRepliesCannotCrashCanvasPreview() {
+        var old=new com.google.gson.Gson().fromJson("{\"id\":\"old\",\"alternatives\":false}",RouteView.Choice.class);
+        assertTrue(old.inputs().isEmpty());
+        assertTrue(old.outputs().isEmpty());
+        assertEquals(0,RouteGraphMath.outputAmount(old,"target"));
+        var constructed=new RouteView.Choice("old",null,null,false);
+        assertTrue(constructed.inputs().isEmpty());
+        assertTrue(constructed.outputs().isEmpty());
+    }
     @Test void sourcesSurviveWireRoundTripWithTheirExactSlot() {
         var gson=new com.google.gson.Gson();var expected=choice("a",List.of(source));
         assertEquals(expected,gson.fromJson(gson.toJson(expected),RouteView.Choice.class));

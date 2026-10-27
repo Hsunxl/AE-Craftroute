@@ -47,7 +47,8 @@ public final class ForcedRoutePlanner<K,R> {
             var program=new ArrayList<ProductionPlanner.Block<R>>();
             var branchCounts=new LinkedHashMap<String,Long>();
             result.counts().forEach((id,n)-> { if(id.path()!=null) branchCounts.merge(id.path(),n,Math::addExact); });
-            for(var b:branches) if(branchCounts.getOrDefault(b.path(),0L)<b.minimum()) throw new IllegalStateException("Unproven branch");
+            for(var b:branches) if(branchCounts.getOrDefault(b.path(),0L)<b.minimum())
+                throw new ProductionPlanningException(UNSUPPORTED,"内部证明不一致：强制分支未完成 "+b.path());
             for(var b:result.program()) {
                 var word=new ArrayList<ProductionPlanner.Step<R>>();
                 for(var s:b.word()) if(s.recipe().physical()!=null) word.add(new ProductionPlanner.Step<>(s.recipe().physical(),s.count()));
@@ -82,10 +83,12 @@ public final class ForcedRoutePlanner<K,R> {
             }
             var used=new LinkedHashMap<K,Long>();
             for(var e:required.entrySet()) {
-                long n=e.getValue().longValueExact(); if(n>stock.getOrDefault(e.getKey(),0L)) throw new IllegalStateException("Physical stock double spent");
+                long n=e.getValue().longValueExact(); if(n>stock.getOrDefault(e.getKey(),0L))
+                    throw new ProductionPlanningException(UNSUPPORTED,"内部证明不一致：起手库存被重复使用");
                 if(n>0) used.put(e.getKey(),n);
             }
-            if(delta.getOrDefault(target,BigInteger.ZERO).compareTo(BigInteger.valueOf(increment))<0) throw new IllegalStateException("Target is not a net increment");
+            if(delta.getOrDefault(target,BigInteger.ZERO).compareTo(BigInteger.valueOf(increment))<0)
+                throw new ProductionPlanningException(UNSUPPORTED,"内部证明不一致：目标未达到净增量");
             return new Proof<>(Map.copyOf(used),Map.copyOf(counts),List.copyOf(program),Map.copyOf(branchCounts));
         } catch(ArithmeticException overflow) { throw new ProductionPlanningException(LIMIT,"强制画布数量超过整数容量；未提交部分程序"); }
     }
