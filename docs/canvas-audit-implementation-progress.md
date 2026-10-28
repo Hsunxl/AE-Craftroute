@@ -382,3 +382,19 @@
 ### 2026-10-28 local.64 构建和本地安装
 - 版本 `1.13.19-local.64-dev`：发布前完整 `test` 与 `routeFunctionalTest` 各 623 项通过，`build/audit-local64-gate.log`；隔离服务端 `mapped-canvas` PASS ticks=441、`growth` PASS ticks=119，对应 `build/audit-local64-{mapped-canvas,growth}.log`。
 - 已安装 `aecraftroute-1.13.19-local.64-dev_neoforge_1.21.1.jar`，SHA-256 `4c4bc84bca37fb9c16518adc6b250c3c6343fc0a40cdf7d086beeb943afac813`。local.63 已移出 mods 并备份在 `build/install-backups`。测试不等于客户端 GUI、超大实网分片及全部处理机配方验收。
+
+### 2026-10-28: cached proof reuse and sparse backward relevance
+
+- The exact certified production cache can reuse an unchanged target/amount/ordered recipe network when stock changes, only if all previously proven prefix capital (`result.used()`) remains available. It never assumes a self-produced seed exists before its first firing, does not cache LIMIT/UNREACHABLE, and still binds fresh variants and performs normal submission validation. This is a warm-path improvement only, not a fix for a cold timeout.
+- Backward search tests recipe relevance using precomputed output-key indices rather than scanning all keys. It does not prune any previously useful recipe or alter backward edges/certification.
+- Added 141-rule seeded ring / 1,000,000 incremental target regression with independent arithmetic replay. It is feasible but generates more than 512 program blocks and is still slow; increasing the repeated-word bound alone did not produce a compact solution and was not retained.
+- `test routeFunctionalTest build -x productionBenchmark --offline` passed; both suites contain 626 tests. `runSelftestServer -PselftestTask=growth --offline`: PASS, 117 ticks, physically delivered 3 diamonds. Logs: `build/audit-sparse-regression.log`, `build/audit-sparse-growth.log`.
+- No install/push. The real entro_crystal network has not been captured or reproduced and no claim is made that these changes solve its cold budget failure, VM-GTL feature parity, or million-scale real-game execution.
+
+### 2026-10-28 长种子环冷计算：捕获实际净增程序而非相等窗口
+
+- 已证实上述合成长环的退化机制：141 配方超过原 128 匹配窗口，但更关键的是增长环逐轮批次数翻倍，相邻程序窗口不相等；仅扩大窗口不能加速。旧构造探针超出 512 程序块或共享 200ms 预算后，退回通用逆向搜索。
+- 现改为在实际目标库存超过本段起点时捕获已执行程序，直接用其精确前缀启动资金 Q、净变化 D、中间峰值 P 限定重复次数，再经原 certify 全程序库存和计数回放。候选失败不剪枝、不宣称缺料；宏后重置捕获起点，不丢失重复次数。保留 long 溢出、取消和原预算。未提高超时。
+- LongSeededRingRegressionTest 覆盖增量 10^6 / 10^9 / 10^16：每种均 142 程序块、explored=142，独立回放、准确种子/燃料和配方次数断言通过。另覆盖缺种子、缺返还物启动库存、最后一轮回料周转金不足（fuel=amount+1，所需 amount+2）、零净增工具返还、累计配方计数溢出、取消和极短预算。不是十六数量级实际物理交付测试，也不是真实恩特罗网络复现。
+- 最终代码完整 test / routeFunctionalTest 各 631 项、0 失败、0 跳过，build 成功；日志 build/audit-ring-full-gate.log。隔离真实 CPU growth PASS ticks=117，mapped-canvas PASS ticks=444；日志 build/audit-ring-growth-server.log、build/audit-ring-mapped-server.log。这两个 CPU 场景交付小数量，不是 141 样板长环的游戏内验证。
+- 限制：新的目标库存高水位捕获启发式不保证所有结构性能优于旧相等后缀探测，例如目标先大幅下降、后续局部环慢慢恢复时，仍可能退回搜索。未完成 VM-GTL 全特性对等、真实网络快照诊断或客户端超大图验收。本轮未提交、推送或实装，安装仍 local.64；用户未跟踪文件未修改。

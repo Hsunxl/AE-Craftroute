@@ -47,6 +47,7 @@ public final class ProductionPlanner<K, R> {
     private final List<Recipe<K,R>> recipes;
     private final Map<R,Integer> recipeIds = new HashMap<>();
     private final BigInteger[][] inputs, outputs, deltas;
+    private final int[][] outputKeyIndices;
     private final BigInteger[] stock;
     private final boolean[] produced;
     private final Limits limits;
@@ -75,6 +76,7 @@ public final class ProductionPlanner<K, R> {
         keys = List.copyOf(all); stock = vector(); produced = new boolean[keys.size()];
         inputs = new BigInteger[recipes.size()][]; outputs = new BigInteger[recipes.size()][];
         deltas = new BigInteger[recipes.size()][];
+        outputKeyIndices = new int[recipes.size()][];
         for (int i=0;i<keys.size();i++) {
             long n=available.getOrDefault(keys.get(i),0L);
             if (n<0) throw new IllegalArgumentException("Negative stock");
@@ -83,6 +85,9 @@ public final class ProductionPlanner<K, R> {
         for (int r=0;r<recipes.size();r++) {
             if (recipeIds.put(recipes.get(r).id,r)!=null) throw new IllegalArgumentException("Duplicate recipe id");
             inputs[r]=vector(recipes.get(r).inputs); outputs[r]=vector(recipes.get(r).outputs);
+            var indices=new int[recipes.get(r).outputs.size()]; int index=0;
+            for(int k=0;k<keys.size();k++) if(outputs[r][k].signum()>0) indices[index++]=k;
+            outputKeyIndices[r]=indices;
             deltas[r]=vector();
             for(int k=0;k<keys.size();k++) {
                 produced[k] |= outputs[r][k].signum()>0;
@@ -215,6 +220,8 @@ public final class ProductionPlanner<K, R> {
             actual[k]=stock[k].longValueExact();
         }
         var blocks=new ArrayList<Block<R>>();
+        int captureStart=0;
+        long captureTarget=actual[target];
         while(result.explored<batches) {
             if(probeExpired(allowance)) return result;
             if(BigInteger.valueOf(actual[target]).compareTo(goal[target])>=0) break;
@@ -269,20 +276,18 @@ public final class ProductionPlanner<K, R> {
             }
             if(!progress) return result;
             if(!pass.isEmpty()) blocks.add(new Block<>(List.copyOf(pass),1));
-            // Steady-state detection: when the last two windows of singleton blocks are
-            // identical, the ring has settled. Jump the remaining cycles arithmetically
-            // (capture-aggregate, upstream AE2-VM style) instead of executing thousands
-            // of passes; certify() replays the macro and remains the only proof gate.
+            // A real target-producing excursion is already a concrete candidate word.
+            // Its batch counts need not repeat (seeded growth often doubles them),
+            // and its length need not fit a fixed ring window. Repetition is allowed
+            // only by exact prefix-capital and peak bounds, then independently certified.
             int m=blocks.size();
-            for(int p=1;p<=128 && m>=2*p;p++) {
-                boolean single=true;
-                for(int i=m-2*p;i<m;i++) if(blocks.get(i).repetitions()!=1) {single=false;break;}
-                if(!single) continue;
-                boolean equal=true;
-                for(int i=0;i<p;i++) if(!blocks.get(m-p+i).equals(blocks.get(m-2*p+i))) {equal=false;break;}
-                if(!equal) continue;
+            if(actual[target]>captureTarget) {
                 var word=new ArrayList<Step<R>>();
-                for(int i=m-p;i<m;i++) word.addAll(blocks.get(i).word());
+                for(int i=captureStart;i<m;i++) {
+                    if(probeExpired(allowance))return result;
+                    word.addAll(blocks.get(i).word());
+                }
+                captureStart=m;captureTarget=actual[target];
                 var summary=summarize(word);var required=summary[0];var net=summary[1];var peak=summary[2];
                 if(net[target].signum()<=0) continue;
                 var remaining=goal[target].subtract(BigInteger.valueOf(actual[target]));
@@ -306,7 +311,7 @@ public final class ProductionPlanner<K, R> {
                 } catch(ArithmeticException overflow) { return result; }
                 blocks.add(new Block<>(List.copyOf(word),cycles.longValueExact()));
                 result.explored++;
-                break;
+                captureStart=blocks.size();captureTarget=actual[target];
             }
         }
         if(BigInteger.valueOf(actual[target]).compareTo(goal[target])<0 || probeExpired(allowance)) return result;
@@ -362,7 +367,7 @@ public final class ProductionPlanner<K, R> {
             for(int r=0;r<recipes.size();r++) {
                 if(expired()) return failure(Status.LIMIT,explored);
                 boolean useful=false;
-                for(int k=0;k<keys.size();k++) useful |= node.need[k].signum()>0 && outputs[r][k].signum()>0;
+                for(int k:outputKeyIndices[r]) if(node.need[k].signum()>0) { useful=true; break; }
                 if(!useful) continue;
                 var d=delta(r);
                 long batch=jump(node.need,d);
@@ -423,6 +428,7 @@ public final class ProductionPlanner<K, R> {
     private BigInteger[][] summarize(List<Step<R>> word) {
         var required=vector(); var change=vector(); var peak=vector();
         for(var step:word) {
+            if(Thread.currentThread().isInterrupted())throw new CancellationException("Production planning cancelled");
             int r=recipeIds.get(step.recipe); var d=delta(r); BigInteger n=BigInteger.valueOf(step.count);
             for(int k=0;k<keys.size();k++) {
                 BigInteger seed=inputs[r][k].add(d[k].negate().max(ZERO).multiply(n.subtract(ONE)));

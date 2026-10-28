@@ -33,6 +33,21 @@ class ProductionPlanCacheTest {
         assertEquals(4, cache.stats().misses());
     }
 
+    @Test void changedStockReusesOnlyWhenCertifiedCapitalStillExists() {
+        var first=cache.solve("out",5,recipes,Map.of("ore",100L,"unused",1L),LIMITS);
+        assertSame(first,cache.solve("out",5,recipes,Map.of("ore",5L,"unused",999L),LIMITS));
+        assertEquals(Status.UNREACHABLE,cache.solve("out",5,recipes,Map.of("ore",4L,"unused",999L),LIMITS).status());
+        assertThrows(IllegalArgumentException.class,()->cache.solve("out",5,recipes,Map.of("ore",5L,"unused",-1L),LIMITS));
+    }
+
+    @Test void seededRingCacheDoesNotPretendProducedSeedExistsBeforeFirstStep() {
+        var ring=List.of(new Recipe<>(0,Map.of("seed",1L,"fuel",1L),Map.of("seed",2L)));
+        var first=cache.solve("seed",1_000_000,ring,Map.of("seed",1L,"fuel",1_000_000L),LIMITS);
+        assertEquals(Status.FEASIBLE,first.status());
+        assertSame(first,cache.solve("seed",1_000_000,ring,Map.of("seed",1L,"fuel",1_000_001L),LIMITS));
+        assertNotEquals(Status.FEASIBLE,cache.solve("seed",1_000_000,ring,Map.of("fuel",1_000_001L),LIMITS).status());
+    }
+
     @Test void equalHashCodesAreNotEqualNets() {
         assertEquals("Aa".hashCode(), "BB".hashCode());
         var stock = Map.of("Aa", 1L, "BB", 0L);

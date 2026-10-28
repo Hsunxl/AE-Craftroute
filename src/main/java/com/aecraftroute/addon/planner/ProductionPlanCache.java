@@ -7,7 +7,9 @@ import java.util.function.LongSupplier;
 /** Bounded memoization of exact, certified production nets, never live patterns/grids.
  * Recipe IDs in a cached witness are positions in the ordered transition list.
  * Callers must bind them to freshly parsed variants, not to an old pattern object.
- * Stock and every transition are compared by value (not a hash alone). Only
+ * Transitions are compared by value (not a hash alone); a proof may also be
+ * reused with different stock when every unit of its certified prefix capital
+ * is still available. Only
  * FEASIBLE results are retained: a timeout must not poison a later larger budget.
  */
 final class ProductionPlanCache<K> {
@@ -36,6 +38,9 @@ final class ProductionPlanCache<K> {
             List<ProductionPlanner.Recipe<K, Integer>> recipes, Map<K, Long> stock,
             ProductionPlanner.Limits limits) {
         checkInterrupted();
+        stock.forEach((key,amountAvailable)-> {
+            if(amountAvailable==null || amountAvailable<0) throw new IllegalArgumentException("Negative or null stock");
+        });
         var flows = new ArrayList<Flow<K>>(recipes.size());
         for (int i = 0; i < recipes.size(); i++) {
             var recipe = recipes.get(i);
@@ -60,7 +65,21 @@ final class ProductionPlanCache<K> {
     private synchronized ProductionPlanner.Result<K, Integer> get(Key<K> key) {
         expire(clock.getAsLong());
         var entry = entries.get(key);
-        if (entry == null) { misses++; return null; }
+        if (entry == null) {
+            Key<K> compatible = null;
+            for (var candidate : entries.entrySet()) {
+                checkInterrupted();
+                var prior = candidate.getKey();
+                if (prior.amount()!=key.amount() || !prior.target().equals(key.target()) || !prior.flows().equals(key.flows())) continue;
+                boolean enough = true;
+                for (var used : candidate.getValue().result().used().entrySet()) {
+                    if (key.stock().getOrDefault(used.getKey(),0L)<used.getValue()) { enough=false; break; }
+                }
+                if (enough) compatible=prior;
+            }
+            if (compatible==null) { misses++; return null; }
+            entry=entries.get(compatible); // refresh LRU after iteration
+        }
         hits++;
         return entry.result();
     }
