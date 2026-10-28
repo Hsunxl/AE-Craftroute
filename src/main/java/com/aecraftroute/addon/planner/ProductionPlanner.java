@@ -274,7 +274,7 @@ public final class ProductionPlanner<K, R> {
             // (capture-aggregate, upstream AE2-VM style) instead of executing thousands
             // of passes; certify() replays the macro and remains the only proof gate.
             int m=blocks.size();
-            for(int p=1;p<=8 && m>=2*p;p++) {
+            for(int p=1;p<=128 && m>=2*p;p++) {
                 boolean single=true;
                 for(int i=m-2*p;i<m;i++) if(blocks.get(i).repetitions()!=1) {single=false;break;}
                 if(!single) continue;

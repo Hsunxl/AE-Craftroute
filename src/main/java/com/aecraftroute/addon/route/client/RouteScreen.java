@@ -46,7 +46,7 @@ public final class RouteScreen extends Screen {
     private static final int RED = 0xFF8E2F2F;
     private static final int PURPLE = 0xFF5A6E85;
     private static final int ROW_H = 32;
-    private static final int MAX_NODES = 80;
+    private static final int MAX_NODES = 512;
     private static final int MAX_QUERIES = 48;
 
     private final Screen parent;
@@ -96,6 +96,10 @@ public final class RouteScreen extends Screen {
     private final Map<String,RouteView.Choice> originalChoices;
     private String armedEncoding;
     private boolean manualBuild;
+    private boolean expandingJei,jeiTreeMode;
+    private RouteRecipeBrowser expansionBrowser;
+    private final Set<String> expansionVisited=new HashSet<>();
+    private int expansionErrors;
     private boolean jeiTab = true;
     private boolean initialized;
     private RouteRecipeBrowser browser;
@@ -279,9 +283,10 @@ public final class RouteScreen extends Screen {
         if (undo.size() >= 64) undo.removeFirst();
         undo.addLast(state);
     }
-    private void checkpoint() { pushUndo(captureState()); }
+    private void checkpoint() { expandingJei=false;expansionBrowser=null;pushUndo(captureState()); }
     private void undoEdit() {
         if (undo.isEmpty()) { status="没有可撤销的画布操作"; return; }
+        expandingJei=false;jeiTreeMode=false;expansionBrowser=null;
         var state=undo.removeLast();branchEdits.restore(state.edits);nodeMenu=false;
         target=state.target; targetAmount=state.amount; targetKeyId=keyId(target); manualBuild=state.manual;
         branches.clear(); branches.putAll(state.branches); branchDrafts.clear(); branchDrafts.putAll(state.drafts);
@@ -328,7 +333,7 @@ public final class RouteScreen extends Screen {
         status = "已调整最终产物数量";
     }
     private void clearManual() {
-        checkpoint(); branchEdits.clear();nodeMenu=false;manualBuild=true; branches.clear(); branchDrafts.clear(); draftChoice=null; draft=null;
+        expandingJei=false;jeiTreeMode=false;expansionBrowser=null;checkpoint(); branchEdits.clear();nodeMenu=false;manualBuild=true; branches.clear(); branchDrafts.clear(); draftChoice=null; draft=null;
         offsets.clear();  selectedNode=null; selectedRecipe=null; rebuildGraph(); status="已清空分支，保留最终产物起点";
     }
     /** Restore the automatic tree layout without touching selected recipes or materials. */
@@ -340,7 +345,20 @@ public final class RouteScreen extends Screen {
         fitCanvas();
         status="已自动整理：清除手动挪动的位置，按树形重新排列并适配窗口（配方与材料不变）";
     }
-    private void restoreTree() { send("restore",null,""); }
+    private void expandJeiTree() {
+        if(target==null) {status="先设置最终产物";return;}
+        if(RouteClient.recipeBrowser==null) {status="JEI 不可用，无法展开配方";return;}
+        checkpoint();
+        try {expansionBrowser=RouteClient.recipeBrowser.get();}
+        catch(RuntimeException error){status="JEI 配方读取器不可用";return;}
+        if(expansionBrowser==null){status="JEI 配方读取器不可用";return;}
+        branchEdits.clear();nodeMenu=false;manualBuild=true;jeiTreeMode=true;expandingJei=true;
+        // Keep user-selected JEI drafts, never import existing network pattern identity.
+        branches.keySet().removeIf(p->!branchDrafts.containsKey(p));
+        expansionVisited.clear();expansionErrors=0;
+        rebuildGraph();status="正在展开 JEI 配方；仅构建画布，不绑定样板";
+    }
+    private void restoreTree() { expandingJei=false;jeiTreeMode=false;expansionBrowser=null;send("restore",null,""); }
     private void clearAppliedCanvas() { send("clearcanvas",null,""); }
     public int contentRight() { return uiLayout().contentRight(); }
     public void showRecipes(AEKey key) { if(narrow()){narrowInspector=true;buildWidgets();}jeiTab=true; if(browser!=null)browser.select(key); }
@@ -552,11 +570,11 @@ public final class RouteScreen extends Screen {
     }
 
     private void buildToolbar() {
-        String[] labels=fromCrafting?new String[]{"还原","撤销","清空","撤画","整理","应用","自动","库存","适应","重载"}
-                :new String[]{"撤销","清空","撤画","整理","应用","自动","库存","适应","重载"};
-        String[] tips={"还原合成树","撤销上一次画布编辑","清空手动分支，保留最终产物","撤销已应用的强制画布，但保留逐材料锁定与禁用设置","自动整理（Home）：清除手动位置并适应窗口",
+        String[] labels=fromCrafting?new String[]{"还原","撤销","清空","撤画","展开","整理","应用","自动","库存","适应","重载"}
+                :new String[]{"撤销","清空","撤画","展开","整理","应用","自动","库存","适应","重载"};
+        String[] tips={"还原合成树","撤销上一次画布编辑","清空手动分支，保留最终产物","撤销已应用的强制画布，但保留逐材料锁定与禁用设置","从最终产物展开 JEI 配方，不读取或固定网络样板", "自动整理（Home）：清除手动位置并适应窗口",
                 "整幅应用到合成","恢复自动路由","仅用现有库存：不再自动选配方，缺料即不可合成","适应窗口：保留手动位置","重载网络样板来源、AE 系列供应器及 JEI 配方映射；保留画布"};
-        Runnable[] actions={this::restoreTree,this::undoEdit,this::clearManual,this::clearAppliedCanvas,this::autoArrange,this::applyCanvas,
+        Runnable[] actions={this::restoreTree,this::undoEdit,this::clearManual,this::clearAppliedCanvas,this::expandJeiTree,this::autoArrange,this::applyCanvas,
                 this::automaticSelected,this::stockSelected,this::fitView,this::reloadMappings};
         var cells=RouteToolbar.of(windowBounds().width()-16,labels.length);
         for(int i=0;i<labels.length;i++) {
@@ -683,6 +701,7 @@ public final class RouteScreen extends Screen {
     }
 
     private void setTarget(AEKey key, long amount, String source, String path) {
+        expandingJei=false;jeiTreeMode=false;expansionBrowser=null;
         target = key;
         targetAmount = Math.max(0, amount);
         this.source = source == null ? "手动" : source;
@@ -975,6 +994,8 @@ public final class RouteScreen extends Screen {
      * cannot express that). The reply carries the authoritative plan for the new rules.</p>
      */
     private void applyCanvas() {
+        if(expandingJei) {status="JEI 配方仍在展开；请等待完成";return;}
+        if(jeiTreeMode) {status="JEI 配方树尚未接入执行时样板匹配，未应用；请勿将草稿当作样板";return;}
         if (!canModify) { status = "请从自动合成确认界面进入修改模式"; return; }
         if (target == null) { status = "先设置最终产物，再整幅应用"; return; }
         var nodes = new ArrayList<com.aecraftroute.addon.route.RouteApply.Node>();
@@ -1127,13 +1148,13 @@ public final class RouteScreen extends Screen {
                 : planned!=null ? new RouteGraphMath.Preview(planned,false,false,"原始合成计划")
                 : !originalChoices.isEmpty() ? new RouteGraphMath.Preview(null,false,false,"系统计划使用库存或原材料")
                 : RouteGraphMath.preview(material.reply, draftFor(material.key));
-        if(custom==null && appliedPathChoices.containsKey(path)) {
+        if(!jeiTreeMode && custom==null && appliedPathChoices.containsKey(path)) {
             var id=appliedPathChoices.get(path);RouteView.Choice matched=null;
             if(material.reply!=null) for(var candidate:material.reply.choices())if(id.equals(candidate.id())){matched=candidate;break;}
             node.preview=new RouteGraphMath.Preview(matched,true,false,material.reply==null?"正在读取已应用路径样板…":"已应用的强制路径（缺失时不改用别的配方）");
         }
         node.cycle = ancestors.contains(material.key);
-        if(material.reply!=null && material.reply.stockOnly())node.preview=RouteGraphMath.preview(material.reply,null);
+        if(!jeiTreeMode && material.reply!=null && material.reply.stockOnly())node.preview=RouteGraphMath.preview(material.reply,null);
         if (node.cycle) {
             node.preview = new RouteGraphMath.Preview(null, false, false, "回料引用：此处连接上层材料；可行性由服务端库存与执行顺序验证");
             return node;
@@ -1270,7 +1291,7 @@ public final class RouteScreen extends Screen {
     }
 
     private void requestMissing() {
-        if (queryCount >= MAX_QUERIES) return;
+        if (jeiTreeMode || queryCount >= MAX_QUERIES) return;
         for (var node : new ArrayList<>(materialNodes)) {
             if (node.material.reply == null && !node.material.loading && node.material.error == null) {
                 query(node.material.renderKey);
@@ -1744,7 +1765,7 @@ public final class RouteScreen extends Screen {
     private void drawFooter(GuiGraphics g) {
         int color = status != null && (status.startsWith("操作失败") || status.contains("失败")) ? RED : MUTED;
         String line=status == null ? "" : status;
-        if(materialNodes.size()>=MAX_NODES)line="已达 80 节点显示上限；"+line;
+        if(materialNodes.size()>=MAX_NODES)line="已达 "+MAX_NODES+" 节点显示上限；"+line;
         text(g, line, windowBounds().left()+10, windowBounds().bottom()-18, windowBounds().width()-20, color);
     }
 
@@ -2267,6 +2288,7 @@ public final class RouteScreen extends Screen {
                 status="样板缓存刷新未收到服务器回应，稍后自动重试";
             } else if(RouteRequestRules.mutation(request.action))status="服务器未在 10 秒内确认；未自动重试，请检查缓存后再操作";
         }
+        if(expandingJei) advanceJeiExpansion();
         if(browser!=null)browser.tick();
         recipeHover.tick();
         if(workbench!=null)workbench.tick();
@@ -2276,6 +2298,39 @@ public final class RouteScreen extends Screen {
         if (mc.player == null || mc.player.containerMenu.containerId != menuId) {
             mc.setScreen(null);
         }
+    }
+
+    /** Do bounded JEI work on the client thread, without querying network sample identities. */
+    private void advanceJeiExpansion() {
+        int work=0;
+        while(work++<2) {
+            MNode next=null;
+            for(var node:materialNodes)if(!expansionVisited.contains(node.path)){next=node;break;}
+            if(next==null) {
+                expandingJei=false;expansionBrowser=null;
+                long cycles=materialNodes.stream().filter(n->n.cycle).count();
+                long depth=materialNodes.stream().filter(n->!n.cycle && n.depth>=RouteGraphMath.MAX_PATH_DEPTH).count();
+                status="JEI 展开："+materialNodes.size()+" 个材料、"+recipeNodes.size()+" 个配方"
+                        +(cycles>0?"；回环停止 "+cycles+" 处":"")
+                        +(depth>0?"；到达深度上限 "+depth+" 处，可能未展开":"")
+                        +(materialNodes.size()>=MAX_NODES?"；达到显示上限，未完全展开":"")
+                        +(expansionErrors>0?"；JEI 读取失败 "+expansionErrors+" 处":"")
+                        +"；仅预览，不绑定样板";
+                return;
+            }
+            expansionVisited.add(next.path);
+            if(next.cycle || next.depth>=RouteGraphMath.MAX_PATH_DEPTH || branchDrafts.containsKey(next.path))continue;
+            try {
+                var found=expansionBrowser.lookupOutput(next.material.renderKey);
+                if(found.failed()){expansionErrors++;continue;}
+                var value=found.draft();if(value==null)continue;
+                var choice=draftChoice(value);
+                if(RouteGraphMath.outputAmount(choice,next.material.key)<=0){expansionErrors++;continue;}
+                branches.put(next.path,choice);branchDrafts.put(next.path,value);
+                rebuildGraph();
+            } catch(RuntimeException error) {expansionErrors++;LOGGER.warn("JEI expansion failed at {}",next.path,error);}
+        }
+        status="正在展开 JEI 配方："+materialNodes.size()+" 个材料；不绑定样板";
     }
 
     public static String summary(List<RouteView.Stack> stacks) {

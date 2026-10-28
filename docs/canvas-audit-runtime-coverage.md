@@ -56,3 +56,7 @@
 - A4：已新增实际NeoECO/AdvancedAE组合运行证据；不扩张为全部ATM10附属组合通过。
 - A5：真实整合包负载/并发容量；2线程+8槽的有界拒绝和恢复已经验证，但不足以证明容量够用。新增真实服务端planning-load一次提交32个请求，第33个准入LIMIT；立即取消8个后，10个成功、14个在worker queue阶段LIMIT，全部终止；随后新请求成功并经真实CPU交付1。此为真实小网络突发负载，不是全ATM10大型网络吞吐结论。
 - C项：代码/无客户端测试不能代替画布实际布局、悬停、缩放等客户端验收。用户目前选择不操作客户端，继续代码和服务端工作。
+
+### 2026-10-28 补充
+- A1：128 分支二叉画布的模型级计划在标记配方优先后通过（目标 1 和 1000），模型证据不替代真实服务端 apply/CPU 与整包实测；修复尚未装入 local.61。
+- A2/A4：ExtendedAE Plus + AdvancedAE + NeoECO 同时加载的 scaled-advanced、scaled-processing-execution、scaled-molecular-execution 三项独立服务端自检通过；其它尺寸和跨进程覆盖仍未完成。

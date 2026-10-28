@@ -24,7 +24,7 @@ public final class ForcedRoutePlanner<K,R> {
         try {
             var byId=new LinkedHashMap<R,ProductionPlanner.Recipe<K,R>>();
             var net=new ArrayList<ProductionPlanner.Recipe<Object,Tagged<R>>>();
-            for(var r:recipes) { byId.put(r.id(),r); net.add(new ProductionPlanner.Recipe<>(new Tagged<>(r.id(),null),objects(r.inputs()),objects(r.outputs()))); }
+            for(var r:recipes) byId.put(r.id(),r);
             var goals=new LinkedHashMap<Object,Long>();
             goals.put(target,Math.addExact(Math.max(0,stock.getOrDefault(target,0L)),increment));
             var paths=new HashSet<String>();
@@ -38,6 +38,9 @@ public final class ForcedRoutePlanner<K,R> {
                     net.add(new ProductionPlanner.Recipe<>(new Tagged<>(id,branch.path()),objects(r.inputs()),outputs));
                 }
             }
+            // Prefer a marked firing when it can satisfy both a physical demand and
+            // a branch obligation; ordinary firings remain available as fallback.
+            for(var r:recipes) net.add(new ProductionPlanner.Recipe<>(new Tagged<>(r.id(),null),objects(r.inputs()),objects(r.outputs())));
             Object goal=new Marker("\u0000goal");
             net.add(new ProductionPlanner.Recipe<>(new Tagged<R>(null,null),goals,Map.of(goal,1L)));
             var result=new ProductionPlanner<>(net,objects(stock),limits).solve(goal,1);

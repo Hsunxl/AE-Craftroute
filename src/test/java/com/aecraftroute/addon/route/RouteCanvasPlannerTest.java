@@ -138,4 +138,28 @@ class RouteCanvasPlannerTest {
         assertEquals(ProductionPlanningException.Reason.INVALID,assertThrows(ProductionPlanningException.class,
                 ()->RouteCanvasPlanner.plan(noRawStock,new RoutePolicy.Canvas<>(keys.getFirst(),1,tooDeep),keys.getFirst(),1,limits)).reason());
     }
-}
+    @Test void maximumWidthCanvasPlansAndPreservesEverySelectedPath() {
+        var patterns=new LinkedHashMap<AEKey,List<IPatternDetails>>();
+        var ids=new IdentityHashMap<IPatternDetails,String>();
+        var paths=new ArrayList<RoutePolicy.Path<AEKey>>();
+        var keys=new ArrayList<BenchAEKey>();
+        var addresses=new ArrayList<String>();
+        for(int i=0;i<128;i++) {keys.add(BenchAEKey.of("wide_"+i)); addresses.add(i==0?"root":addresses.get((i-1)/2)+"/"+((i-1)%2));}
+        var raw=BenchAEKey.of("wide_raw");
+        for(int i=0;i<128;i++) {
+            var left=2*i+1<128?keys.get(2*i+1):raw;
+            var right=2*i+2<128?keys.get(2*i+2):raw;
+            var pattern=new BenchPatternDetails(keys.get(i),1,List.of(of(left,1),of(right,1)));
+            var id="wide_pattern_"+i; patterns.put(keys.get(i),List.of(pattern)); ids.put(pattern,id);
+            paths.add(new RoutePolicy.Path<>(addresses.get(i),keys.get(i),id));
+        }
+        for(long amount:new long[]{1,1000}) {
+            var snapshot=new RouteSnapshot.Result(patterns,Map.of(raw,129*amount),ids);
+            var canvas=new RoutePolicy.Canvas<AEKey>(keys.getFirst(),amount,paths);
+            var plan=RouteCanvasPlanner.plan(snapshot,canvas,keys.getFirst(),amount,
+                    new ProductionPlanner.Limits(30_000,3_000_000_000L));
+            assertEquals(128,plan.patternTimes().size());
+            assertEquals(129*amount,plan.usedItems().get(raw));
+            assertTrue(plan.patternTimes().values().stream().allMatch(n->n==amount));
+        }
+    }}

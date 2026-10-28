@@ -325,3 +325,16 @@
 - Release：<https://github.com/Hsunxl/AE-Craftroute/releases/tag/v1.13.19-local.60-dev>（Pre-release，3 附件齐全，中文正文含原因/加固/验证/限制）。首次 `gh release create` 遇 graphql EOF，重试成功（无重复发布）。
 - 本地实装：`D:/pcl/versions/ATM10/mods/` 已删除 local.59 jar、放入 local.60 jar，sha256 与发布附件一致（`0bd5473d…af274`）。
 
+
+### 2026-10-28 local.61 实装及 A1/A2 补充验证
+
+- 合成回路复现：32 上游分支、13 步增长环，旧实现目标净增 1000 返回 LIMIT；重复窗口限制从 8 扩展至 128，新增独立算术回放测试覆盖 1000 至 10^16。local.61 通过完整门禁后安装，旧 local.60 留存于 build/install-backups。安装文件 SHA-256 `97e22f3f61067f9f9b1296707e7266d45db680f87571daca9bbac96df68ea8c9`。真实玩家网络未采样，不能认定实际恩特罗水晶的根因已确定。
+- A1 新增 128 个独立样板、二叉分支的画布规划模型测试，净增 1 / 1000。修改前返回 LIMIT；原因是无标记物理配方先于带路径标记的配方，DAG 选择无法同时利用一次执行满足物料和分支义务，构造快捷方案失败。标记配方优先、普通配方仍保留，测试通过；保留所有分支计数及物理程序的独立证明。此第二项修复仅在工作树，未装入供用户测试的 local.61。此测试不是 128 节点真实服务端或整包网络采样，A1 运行期缺口仍未关闭。
+- A2/A4 三模组组合：实际安装版 ExtendedAE Plus + AdvancedAE + NeoECO 共同加载，`scaled-advanced` PASS ticks=19、`scaled-processing-execution` PASS ticks=63、`scaled-molecular-execution` PASS ticks=20，日志 `build/audit-local61-neoeco-scaled-*.log`。仅验证这些特定场景，不代表其它尺寸、持久化、完整 ATM10 网络通过。
+- A1 标记配方优先修改后的全量门禁：`test` / `routeFunctionalTest` 各 608 项、0 失败；独立真实服务端 `paths` 113 ticks、`vanilla-canvas` 18 ticks、`growth` 118 ticks 全部 PASS，日志 `build/audit-wide-canvas-{gate,paths,vanilla-canvas,growth}.log`。这些小网络自检不证明 128 节点真实 CPU 已验证。
+
+
+### 2026-10-28 配方树与执行样板解耦（进行中）
+- 用户明确要求画布按配方而非网络样板展开，后续由执行层/供应器选样板。已撤掉基于网络样板的一键展开尝试，工具栏“展开”现以 JEI 产物查询构建草稿树，每 tick 最多处理两个节点；不以库存、网络锁定或已应用样板决定 JEI 树，不把不存在编码样板当成原料。使用首个可转换 JEI 配方，回环、深度和 512 节点限制有提示。
+- 尚未完成执行时绑定：现有 RouteCanvasPlanner / ForcedRoutePlanner 依赖已冻结 IPatternDetails 和精确 PatternVariant，ProductionJob 在扣料与 dispatch 时按样板身份校验。JEI Draft 只记录当前显示的材料/产物，未完整表达替代输入、返回物、概率和机器语义，不能直接伪装为已认证样板。JEI 树目前禁止“应用”，没有改变现有执行保证；需要后续实现可信配方契约、执行绑定与一致性校验，并覆盖缺样板、歧义、返还物和跨重启等情况。
+- 全量门禁两组各 608 项通过，独立服务端 paths PASS ticks=109（`build/audit-jei-tree-gate.log`、`build/audit-jei-tree-paths.log`）；尚无一键展开 UI 验收，未实装本批改动。

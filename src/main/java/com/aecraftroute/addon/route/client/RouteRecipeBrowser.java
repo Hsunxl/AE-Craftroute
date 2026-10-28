@@ -16,6 +16,9 @@ public interface RouteRecipeBrowser {
     default java.util.List<Option> options() {return java.util.List.of();}
     default void selectIndex(int index) {}
     default RouteView.Draft currentDraft() {return null;}
+    /** A JEI lookup is independent of network patterns and never implies executability. */
+    record Lookup(RouteView.Draft draft, boolean failed) {}
+    default Lookup lookupOutput(AEKey key) {return new Lookup(null,true);}
     default void renderOption(GuiGraphics graphics,int index,int x,int y,int width,int mx,int my) {}
     default boolean optionMachineContains(int index,int x,int y,int width,double mx,double my) {return mx>=x && mx<x+18 && my>=y && my<y+18;}
     default void showOptionMachine(int index) {}

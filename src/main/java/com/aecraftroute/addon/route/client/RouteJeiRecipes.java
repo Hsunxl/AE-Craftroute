@@ -210,6 +210,18 @@ final class RouteJeiRecipes implements RouteRecipeBrowser {
         if(layout==null)return null;
         try {stableDraft=RouteJeiPlugin.readDraft(layout,stableDraft,null);return stableDraft;}catch(RuntimeException e) {error=e.getMessage();return null;}
     }
+    public Lookup lookupOutput(AEKey output) {
+        select(output);
+        if(recipes.isEmpty())return new Lookup(null,!error.isEmpty());
+        for(int i=0;i<recipes.size();i++) {
+            selectIndex(i);var draft=currentDraft();
+            if(draft!=null && draft.outputs().stream().anyMatch(s->{
+                try{return output.equals(s.decode(Minecraft.getInstance().level.registryAccess()));}
+                catch(RuntimeException invalid){return false;}
+            }))return new Lookup(draft,false);
+        }
+        return new Lookup(null,true);
+    }
     private AEKey ingredientKey(ITypedIngredient<?> value) {
         try {return RouteJeiConverters.from(value).what();}catch(RuntimeException e) {return null;}
     }
