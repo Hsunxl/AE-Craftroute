@@ -372,3 +372,13 @@
 ### 2026-10-28 local.63 构建和本地安装
 - 版本 `1.13.19-local.63-dev`；两套门禁各 621 tests、0 失败（`build/audit-local63-gate.log`）；隔离服务端 `mapped-canvas` PASS ticks=441、`growth` PASS ticks=118（`build/audit-local63-{mapped-canvas,growth}.log`）。
 - 安装 jar 的 SHA-256 为 `23438d0031573b5124c7e2e7ff5ee0341a3eb4ba0c51ac5101675764002c616b`；local.62 已移出 mods 并备份在 `build/install-backups`。普通工作台受验证的 JEI 配方可走映射，处理机/概率配方、超大分片实网与客户端交互不在此次通过范围。
+
+### 2026-10-28 映射候选重复扫描优化（local.63 后续工作树）
+- local.63 本地安装并推送提交 `1d96a72` 至 `origin/wip/planner-vm-ui-2026-10-25`；安装 hash 和自检见上节。未创建 GitHub Release。
+- 同一产物与服务端验证定义只建立一次“精确输入/输出 → 候选 PatternVariant”索引，保持真实样板对象身份、原候选顺序、完整性标记、线程取消与截止时间；1,000 个相同配方路径只建一次索引。工作区尚未提交、推送或实装此后续优化，避免改变正在测试的 local.63。
+- 语义相同前后对照：纯 JVM 合成夹具，2,000 路径×64 候选，预热 3、样本 10，线性扫描 p50=8.685ms、索引 p50=1.122ms（约 7.74×）；不含真实网络捕获、JEI、客户端绘制及 CPU 执行，`build/audit-mapping-index-benchmark.log`。样板缺失/不完整/取消及候选多解回归保留。
+- 两组完整门禁各 623 项通过，`build/audit-mapping-index-final-gate.log`；隔离服务端 mapped-canvas PASS ticks=443，`build/audit-mapping-index-selftest.log`；其中自检早于最后新增的纯取消测试，不影响被测生产实现。
+
+### 2026-10-28 local.64 构建和本地安装
+- 版本 `1.13.19-local.64-dev`：发布前完整 `test` 与 `routeFunctionalTest` 各 623 项通过，`build/audit-local64-gate.log`；隔离服务端 `mapped-canvas` PASS ticks=441、`growth` PASS ticks=119，对应 `build/audit-local64-{mapped-canvas,growth}.log`。
+- 已安装 `aecraftroute-1.13.19-local.64-dev_neoforge_1.21.1.jar`，SHA-256 `4c4bc84bca37fb9c16518adc6b250c3c6343fc0a40cdf7d086beeb943afac813`。local.63 已移出 mods 并备份在 `build/install-backups`。测试不等于客户端 GUI、超大实网分片及全部处理机配方验收。

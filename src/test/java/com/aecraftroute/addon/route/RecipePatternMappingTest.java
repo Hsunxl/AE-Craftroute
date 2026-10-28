@@ -81,4 +81,24 @@ class RecipePatternMappingTest {
         assertEquals(amount,plan.usedItems().get(ore));assertEquals(amount,plan.patternTimes().get(pattern));
         assertTrue(plan.program().size()<10);
     }
+    @Test void repeatedRecipePathsShareTheProducerIndex() {
+        var pattern=new BenchPatternDetails(out,1,List.of(of(ore,1)));
+        var snapshot=new RouteSnapshot.Result(Map.of(out,List.of(pattern)),Map.of());
+        var recipes=new ArrayList<RecipePatternMapping.Recipe>();
+        for(int i=0;i<1000;i++)recipes.add(new RecipePatternMapping.Recipe("path-"+i,out,Map.of(ore,1L),Map.of(out,1L)));
+        var builds=new java.util.concurrent.atomic.AtomicInteger();
+        var result=RecipePatternMapping.discover(recipes,snapshot,k->0L,System.nanoTime()+3_000_000_000L,builds::incrementAndGet);
+        assertEquals(1000,result.size());assertTrue(result.values().stream().allMatch(v->v.complete() && v.variants().size()==1));
+        assertEquals(1,builds.get(),"one index per output and verified definition");
+    }
+    @Test void indexBuildingPropagatesCancellation() {
+        var pattern=new BenchPatternDetails(out,1,List.of(of(ore,1)));
+        var snapshot=new RouteSnapshot.Result(Map.of(out,List.of(pattern)),Map.of());
+        var recipe=new RecipePatternMapping.Recipe("root",out,Map.of(ore,1L),Map.of(out,1L));
+        Thread.currentThread().interrupt();
+        try {
+            assertThrows(java.util.concurrent.CancellationException.class,()->
+                    RecipePatternMapping.discover(List.of(recipe),snapshot,k->0L,System.nanoTime()+3_000_000_000L));
+        } finally {Thread.interrupted();}
+    }
 }

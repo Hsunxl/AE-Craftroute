@@ -25,33 +25,46 @@ public final class RecipePatternMapping {
     public record Candidates(List<PatternVariant> variants,boolean complete) {
         public Candidates {variants=List.copyOf(variants);}
     }
-    /** Enumerate every available producer and preserve ambiguous and incomplete results. */
+    private record Lookup(AEKey output,appeng.api.stacks.AEItemKey definition) {}
+    private record Flow(Map<AEKey,Long> inputs,Map<AEKey,Long> outputs) {}
+    private record Index(Map<Flow,List<PatternVariant>> flows,boolean complete) {}
+    /** Enumerate each distinct producer group once, then resolve repeated paths by
+     * exact flow lookup. This remains only candidate discovery, not a proof. */
     public static Map<String,Candidates> discover(List<Recipe> recipes,RouteSnapshot.Result snapshot,
                                                    Function<AEKey,Long> stock,long deadlineNanos) {
+        return discover(recipes,snapshot,stock,deadlineNanos,()->{});
+    }
+    static Map<String,Candidates> discover(List<Recipe> recipes,RouteSnapshot.Result snapshot,
+                                                   Function<AEKey,Long> stock,long deadlineNanos,Runnable indexBuilt) {
         var result=new LinkedHashMap<String,Candidates>();
-        // Shared occurrences must not re-enumerate an identical live pattern; keep
-        // physical identity distinct even when third-party equals is permissive.
+        // Keep physical pattern identity distinct, even if a third party equals()
+        // considers two providers equivalent. A numeric compilation may be reused.
         var enumerated=new IdentityHashMap<appeng.api.crafting.IPatternDetails,PatternVariants.Enumeration>();
+        var indices=new HashMap<Lookup,Index>();
         for(var recipe:recipes) {
             RouteCanvasPlanner.check(deadlineNanos);
             if(result.containsKey(recipe.path()))throw new IllegalArgumentException("Duplicate recipe path: "+recipe.path());
-            var found=new ArrayList<PatternVariant>();boolean complete=true;
-            for(var pattern:snapshot.patterns().getOrDefault(recipe.output(),List.of())) {
-                RouteCanvasPlanner.check(deadlineNanos);
-                // Only a server-generated exact definition can establish recipe identity.
-                // Numeric-only contracts remain useful for tests, but are never accepted
-                // directly from a client into the production canvas.
-                if(recipe.expectedDefinition()!=null && !recipe.expectedDefinition().equals(pattern.getDefinition()))continue;
-                var variants=enumerated.get(pattern);
-                if(variants==null){variants=PatternVariants.enumerate(pattern,stock,deadlineNanos);enumerated.put(pattern,variants);}
-                complete &= variants.complete();
-                for(var variant:variants.recipes()) {
+            var lookup=new Lookup(recipe.output(),recipe.expectedDefinition());
+            var index=indices.get(lookup);
+            if(index==null) {
+                var flows=new HashMap<Flow,List<PatternVariant>>();boolean complete=true;
+                for(var pattern:snapshot.patterns().getOrDefault(recipe.output(),List.of())) {
                     RouteCanvasPlanner.check(deadlineNanos);
-                    if(variant.inputs().equals(recipe.inputs()) && variant.outputs().equals(recipe.outputs()))
-                        found.add(variant.id());
+                    // The client cannot supply trusted definition identities: only a
+                    // server-generated exact definition can establish recipe identity.
+                    if(recipe.expectedDefinition()!=null && !recipe.expectedDefinition().equals(pattern.getDefinition()))continue;
+                    var variants=enumerated.get(pattern);
+                    if(variants==null){variants=PatternVariants.enumerate(pattern,stock,deadlineNanos);enumerated.put(pattern,variants);}
+                    complete &= variants.complete();
+                    for(var variant:variants.recipes()) {
+                        RouteCanvasPlanner.check(deadlineNanos);
+                        flows.computeIfAbsent(new Flow(variant.inputs(),variant.outputs()),ignored->new ArrayList<>()).add(variant.id());
+                    }
                 }
+                index=new Index(flows,complete);indices.put(lookup,index);indexBuilt.run();
             }
-            result.put(recipe.path(),new Candidates(found,complete));
+            var found=index.flows().getOrDefault(new Flow(recipe.inputs(),recipe.outputs()),List.of());
+            result.put(recipe.path(),new Candidates(found,index.complete()));
         }
         return Collections.unmodifiableMap(result);
     }
