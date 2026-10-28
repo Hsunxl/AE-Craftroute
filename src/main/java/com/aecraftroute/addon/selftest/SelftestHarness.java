@@ -1034,6 +1034,8 @@ public final class SelftestHarness {
                 return;
             }
             AEKey target = AEItemKey.of(vanilla?Items.IRON_BLOCK:Items.DIAMOND);
+            if("mapped-growth".equals(task)) {submitMappedGrowth(target);return;}
+            if("mapped-canvas".equals(task)) {submitMappedCanvas(target);return;}
             if("planning-load".equals(task)) {startPlanningLoad();return;}
             if("scaled-molecular-execution".equals(task)) {
                 pendingCalculation=service.beginCraftingCalculation(level,(ICraftingSimulationRequester)foreignRequester,
@@ -1086,6 +1088,76 @@ public final class SelftestHarness {
             LOG.info("[SELFTEST] calculation requested, waiting off the server thread");
             phase = Phase.CALCULATING;
             phaseTicks = 0;
+        }
+
+        /** A live server-verified recipe tree, real payload codec, snapshot, async planner
+         * and real CPU. FakePlayer supplies registries without opening a game client. */
+        private void submitMappedCanvas(AEKey target) {
+            var regs=level.registryAccess();var nodes=new ArrayList<com.aecraftroute.addon.route.RouteApply.Node>();
+            java.util.function.BiConsumer<String,String[]> add=(path,spec)->{
+                var in=net.minecraft.core.registries.BuiltInRegistries.ITEM.get(net.minecraft.resources.ResourceLocation.parse(spec[1]));
+                var out=net.minecraft.core.registries.BuiltInRegistries.ITEM.get(net.minecraft.resources.ResourceLocation.parse(spec[2]));
+                var input=com.aecraftroute.addon.route.RouteView.Stack.of(AEItemKey.of(in),1,regs);
+                var output=com.aecraftroute.addon.route.RouteView.Stack.of(AEItemKey.of(out),Long.parseLong(spec[3]),regs);
+                var draft=new com.aecraftroute.addon.route.RouteView.Draft("selftest:"+spec[0],"crafting",List.of(input),List.of(output),"");
+                nodes.add(new com.aecraftroute.addon.route.RouteApply.Node(output.key(),"jei:"+draft.recipeId(),output.name(),path,draft));
+            };
+            add.accept("root",new String[]{"powder_to_crystal","minecraft:emerald","minecraft:diamond","1"});
+            add.accept("root/0",new String[]{"seed_to_powder","minecraft:lapis_lazuli","minecraft:emerald","1"});
+            add.accept("root/0/0",new String[]{"crystal_to_seed","minecraft:diamond","minecraft:lapis_lazuli","2"});
+            var encoded=com.aecraftroute.addon.route.RouteCanvasPayload.encode(requested,nodes);
+            var decoded=com.aecraftroute.addon.route.RouteCanvasPayload.decode(encoded);
+            var fake=net.neoforged.neoforge.common.util.FakePlayerFactory.getMinecraft(level);
+            var prepared=com.aecraftroute.addon.route.RouteApply.prepare(grid,
+                    new com.aecraftroute.addon.route.RoutePolicy<AEKey>(java.util.Map.of()),regs,target,requested,decoded.nodes(),fake);
+            if(!prepared.problems().isEmpty())throw new IllegalStateException("mapped-canvas validation: "+prepared.problems());
+            if(prepared.locked().size()!=3)throw new IllegalStateException("mapped-canvas lost paths");
+            var forged=new ArrayList<>(decoded.nodes());var original=forged.getFirst();var draft=original.draft();
+            var bad=new com.aecraftroute.addon.route.RouteView.Draft(draft.recipeId(),draft.category(),
+                    List.of(com.aecraftroute.addon.route.RouteView.Stack.of(AEItemKey.of(Items.DIRT),1,regs)),draft.outputs(),draft.note());
+            forged.set(0,new com.aecraftroute.addon.route.RouteApply.Node(original.keyTag(),original.choiceId(),original.label(),original.path(),bad));
+            var reject=com.aecraftroute.addon.route.RouteApply.prepare(grid,
+                    new com.aecraftroute.addon.route.RoutePolicy<AEKey>(java.util.Map.of()),regs,target,requested,forged,fake);
+            if(reject.problems().isEmpty() || reject.policy().canvas()!=null)
+                throw new IllegalStateException("forged JEI input was not rejected atomically");
+            try {
+                com.aecraftroute.addon.route.RouteCanvasPlanner.plan(
+                        new com.aecraftroute.addon.route.RouteSnapshot.Result(java.util.Map.of(),java.util.Map.of()),
+                        prepared.policy().canvas(),target,requested,
+                        new com.aecraftroute.addon.planner.ProductionPlanner.Limits(1000,1_000_000_000L));
+                throw new IllegalStateException("mapped canvas without physical patterns was accepted");
+            } catch(com.aecraftroute.addon.planner.ProductionPlanningException expected) {
+                if(expected.reason()!=com.aecraftroute.addon.planner.ProductionPlanningException.Reason.INVALID)throw expected;
+            }
+            var limits=new com.aecraftroute.addon.planner.ProductionPlanner.Limits(150_000,30_000_000_000L);
+            pendingCalculation=com.aecraftroute.addon.route.RoutePlanningService.planAsync(grid,prepared.policy(),regs,target,requested,limits,()->!finished)
+                    .thenApply(p->(ICraftingPlan)p);
+            LOG.info("[SELFTEST] mapped-canvas payload decoded, three recipes verified, async snapshot requested");
+            phase=Phase.CALCULATING;phaseTicks=0;
+        }
+
+        /** Real patterns, stock and CPU, while the contract itself is derived from the
+         * fixture patterns (this does not test JEI validation or packet transport). */
+        private void submitMappedGrowth(AEKey target) {
+            var limits=new com.aecraftroute.addon.planner.ProductionPlanner.Limits(150_000,30_000_000_000L);
+            var frozen=com.aecraftroute.addon.route.RouteSnapshot.build(grid,
+                    new com.aecraftroute.addon.route.RoutePolicy<AEKey>(java.util.Map.of()),
+                    level.registryAccess(),target,System.nanoTime()+limits.nanos());
+            var recipes=new ArrayList<com.aecraftroute.addon.route.RecipePatternMapping.Recipe>();
+            var minimums=new java.util.LinkedHashMap<String,Long>();
+            int index=0;
+            for(var key:List.of(AEItemKey.of(Items.DIAMOND),AEItemKey.of(Items.LAPIS_LAZULI),AEItemKey.of(Items.EMERALD))) {
+                var pattern=grid.getCraftingService().getCraftingFor(key).iterator().next();
+                var variants=com.aecraftroute.addon.planner.PatternVariants.enumerate(pattern,k->frozen.stock().getOrDefault(k,0L));
+                if(!variants.complete() || variants.recipes().isEmpty())throw new IllegalStateException("mapped fixture variant is incomplete");
+                var recipe=variants.recipes().getFirst();String path="fixture-"+index++;
+                recipes.add(new com.aecraftroute.addon.route.RecipePatternMapping.Recipe(path,key,recipe.inputs(),recipe.outputs()));
+                minimums.put(path,1L);
+            }
+            var mapped=com.aecraftroute.addon.route.RouteCanvasPlanner.planMapped(frozen,target,requested,recipes,minimums,limits);
+            LOG.info("[SELFTEST] mapped-growth certified: patterns={} startup={} bytes={}",mapped.patternTimes().size(),mapped.usedItems(),mapped.bytes());
+            pendingCalculation=java.util.concurrent.CompletableFuture.completedFuture(mapped);
+            phase=Phase.CALCULATING;phaseTicks=0;
         }
 
         private java.util.concurrent.CompletableFuture<CertifiedCraftingPlan> loadRequest() {

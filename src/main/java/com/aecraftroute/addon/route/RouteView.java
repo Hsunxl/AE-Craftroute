@@ -38,14 +38,16 @@ public final class RouteView {
         @Override public List<PatternSource> sources() {return sources==null?List.of():sources;}
         public Choice(String id,List<Stack> inputs,List<Stack> outputs,boolean alternatives) {this(id,inputs,outputs,alternatives,List.of());}
     }
-    public record PathChoice(String path,String choiceId) {}
+    public record PathChoice(String path,String choiceId,Draft draft) {
+        public PathChoice(String path,String choiceId){this(path,choiceId,null);}
+    }
     /** Authoritative confirm-menu request; unlike private client menu fields, this is synchronized. */
     public record RequestTarget(String key,long amount) {}
     public record CanvasChoices(String target,long amount,List<PathChoice> paths) {
         public static CanvasChoices of(RoutePolicy.Canvas<AEKey> canvas,HolderLookup.Provider registries) {
             if(canvas==null)return null;
             return new CanvasChoices(canvas.target().toTagGeneric(registries).toString(),canvas.amount(),
-                    canvas.paths().stream().map(p->new PathChoice(p.path(),p.choiceId())).toList());
+                    canvas.paths().stream().map(p->new PathChoice(p.path(),p.choiceId(),p.draft())).toList());
         }
     }
     public record Reply(String message, List<Choice> choices, String locked, List<String> banned,

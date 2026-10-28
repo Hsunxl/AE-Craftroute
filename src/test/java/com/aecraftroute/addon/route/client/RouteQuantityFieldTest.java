@@ -49,7 +49,7 @@ class RouteQuantityFieldTest {
     }
     @Test void scrollingCannotCreateZeroNegativeOrOverflowingAmounts() {
         assertEquals("1",RouteQuantityField.stepText("1",10,64,-1,false));
-        assertEquals(Long.toString(RouteGraphMath.MAX_DEMAND),RouteQuantityField.stepText("999999999999999",10,64,1,false));
+        assertEquals("1000000000000063",RouteQuantityField.stepText("999999999999999",10,64,1,false));
         assertEquals("8",RouteQuantityField.stepText("7",10,0,1,false));
     }
     @Test void combinedTypingAndWheelPreservesTheModelUntilCommit() {

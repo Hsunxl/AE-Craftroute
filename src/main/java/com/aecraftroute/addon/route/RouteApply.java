@@ -18,8 +18,9 @@ import java.util.List;
  */
 public final class RouteApply {
     /** One canvas node, still in wire form (SNBT key text + pattern identity). */
-    public record Node(String keyTag, String choiceId, String label, String path) {
-        public Node(String keyTag,String choiceId,String label) {this(keyTag,choiceId,label,null);}
+    public record Node(String keyTag, String choiceId, String label, String path,RouteView.Draft draft) {
+        public Node(String keyTag,String choiceId,String label,String path){this(keyTag,choiceId,label,path,null);}
+        public Node(String keyTag,String choiceId,String label) {this(keyTag,choiceId,label,null,null);}
     }
 
     public record Outcome(RoutePlanView plan, RoutePolicy<AEKey> policy,
@@ -36,8 +37,14 @@ public final class RouteApply {
     /** Validation only: no session state is changed until a certified plan commits. */
     public static Prepared prepare(IGrid grid,RoutePolicy<AEKey> base,HolderLookup.Provider registries,
                                     AEKey target,long amount,List<Node> nodes) {
-        if(nodes.size()>RouteCanvasPayload.MAX_NODES)throw new IllegalArgumentException("强制画布最多 "+RouteCanvasPayload.MAX_NODES+" 个分支");
+        return prepare(grid,base,registries,target,amount,nodes,null);
+    }
+    public static Prepared prepare(IGrid grid,RoutePolicy<AEKey> base,HolderLookup.Provider registries,
+                                    AEKey target,long amount,List<Node> nodes,net.minecraft.server.level.ServerPlayer player) {
         var paths=new ArrayList<RoutePolicy.Path<AEKey>>();var locked=new ArrayList<String>();var problems=new ArrayList<String>();
+        // A canvas can contain many occurrences of the same recipe. Server validation
+        // is independent of the path, so do it once per exact target/draft per request.
+        var verified=new java.util.HashMap<java.util.List<Object>,RecipePatternMapping.Recipe>();
         for(var node:nodes) {
             String label=node.label()==null?node.path():node.label();
             AEKey material=null;
@@ -52,7 +59,17 @@ public final class RouteApply {
             if(material==null || node.choiceId()==null || node.choiceId().isBlank()) {
                 problems.add("「"+label+"」材料或样板标识无效"+(decodeFailure==null?"":"（"+decodeFailure+"）"));continue;}
             if(!RouteGraphMath.validPath(node.path())) {problems.add("「"+label+"」缺少有效路径，请重新打开画布");continue;}
-            paths.add(new RoutePolicy.Path<>(node.path(),resolved,node.choiceId()));locked.add(node.label()==null?node.path():node.label()+" @ "+node.path());
+            RecipePatternMapping.Recipe recipe=null;
+            if(node.draft()!=null) {
+                try {
+                    if(player==null || !node.choiceId().equals("jei:"+node.draft().recipeId()))throw new IllegalArgumentException("配方身份不一致");
+                    java.util.List<Object> cacheKey=java.util.List.of(resolved,node.draft());
+                    var template=verified.get(cacheKey);
+                    if(template==null) {template=RoutePatternEncoder.authoritativeCrafting(player,node.path(),resolved,node.draft());verified.put(cacheKey,template);}
+                    recipe=new RecipePatternMapping.Recipe(node.path(),resolved,template.inputs(),template.outputs(),template.expectedDefinition());
+                } catch(RuntimeException failure) {problems.add("「"+label+"」配方未通过服务端验证："+failure.getMessage());continue;}
+            } else if(node.choiceId().startsWith("jei:")) {problems.add("「"+label+"」缺少配方契约");continue;}
+            paths.add(new RoutePolicy.Path<>(node.path(),resolved,node.choiceId(),recipe,node.draft()));locked.add(node.label()==null?node.path():node.label()+" @ "+node.path());
         }
         if(paths.isEmpty())problems.add("画布没有可执行的路径分支");
         var candidate=problems.isEmpty()?new RoutePolicy<>(base.rules(),new RoutePolicy.Canvas<>(target,amount,paths)):base;

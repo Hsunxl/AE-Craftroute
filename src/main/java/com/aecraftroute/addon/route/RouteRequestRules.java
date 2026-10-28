@@ -24,6 +24,8 @@ public final class RouteRequestRules {
         return amount;
     }
     public static boolean expired(long now,long started) {return now-started>200;}
+    /** Apply is computed off-thread and has a 30-second end-to-end server budget. */
+    public static boolean expiredApply(long now,long started) {return now-started>900;}
     public static boolean beginRetryDue(long now,long retryAt) {return retryAt>=0 && now>=retryAt;}
     public static boolean currentPlanResponse(int response,int latest,String requested,String current) {
         return response==latest && java.util.Objects.equals(requested,current);

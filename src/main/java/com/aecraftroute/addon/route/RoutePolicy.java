@@ -6,7 +6,10 @@ import java.util.function.Function;
 /** Immutable hard constraints. Empty results must NEVER fall back to automatic recipes. */
 public record RoutePolicy<K>(Map<K, Rule> rules, Canvas<K> canvas) {
     /** Path contracts are request-specific, immutable, and consumed by the real CPU planner. */
-    public record Path<K>(String path, K key, String choiceId) {}
+    public record Path<K>(String path, K key, String choiceId, RecipePatternMapping.Recipe recipe,RouteView.Draft draft) {
+        public Path(String path,K key,String choiceId){this(path,key,choiceId,null,null);}
+        public Path(String path,K key,String choiceId,RecipePatternMapping.Recipe recipe){this(path,key,choiceId,recipe,null);}
+    }
     public record Canvas<K>(K target, long amount, List<Path<K>> paths) {
         public Canvas { paths=List.copyOf(paths); }
     }

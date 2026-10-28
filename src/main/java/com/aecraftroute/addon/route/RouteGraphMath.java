@@ -11,18 +11,22 @@ import java.util.List;
  */
 public final class RouteGraphMath {
     private RouteGraphMath() {}
-    /** Maximum number of child segments accepted by both the UI and server. */
-    public static final int MAX_PATH_DEPTH = 24;
-    private static final java.util.regex.Pattern VALID_PATH = java.util.regex.Pattern.compile(
-            "root(?:/[0-9]{1,3}){0," + MAX_PATH_DEPTH + "}");
-    private static final java.util.regex.Pattern EXTENDABLE_PATH = java.util.regex.Pattern.compile(
-            "root(?:/[0-9]{1,3}){0," + (MAX_PATH_DEPTH - 1) + "}");
+    /** Validate iteratively: long paths must not consume regex/backtracking stack. */
     public static boolean validPath(String path) {
-        return path != null && VALID_PATH.matcher(path).matches();
+        if(path==null || !path.startsWith("root"))return false;
+        int i=4;
+        while(i<path.length()) {
+            if(path.charAt(i++)!='/')return false;
+            int digits=0;long index=0;
+            while(i<path.length() && path.charAt(i)>='0' && path.charAt(i)<='9') {
+                index=index*10+(path.charAt(i++)-'0');digits++;
+                if(index>Integer.MAX_VALUE || digits>10)return false;
+            }
+            if(digits==0)return false;
+        }
+        return true;
     }
-    public static boolean canExtendPath(String path) {
-        return path!=null && EXTENDABLE_PATH.matcher(path).matches();
-    }
+    public static boolean canExtendPath(String path) {return validPath(path);}
     /** Defensive parent lookup for restored or foreign UI nodes. */
     public static String parentPath(String path) {
         if(path==null)return null;
@@ -31,7 +35,7 @@ public final class RouteGraphMath {
     }
     /** v3 path protocol shared by canvas expansion, ingredient drops and server proof. */
     public static String childPath(String parent,int inputGroup) {
-        if(!canExtendPath(parent) || inputGroup<0 || inputGroup>999)
+        if(!canExtendPath(parent) || inputGroup<0)
             throw new IllegalArgumentException("Invalid canvas child path");
         return parent+"/"+inputGroup;
     }
@@ -97,7 +101,7 @@ public final class RouteGraphMath {
     }
 
     /** Upper bound for a user-set or stepped demand; keeps inputNeed far from overflow. */
-    public static final long MAX_DEMAND = 1_000_000_000_000L;
+    public static final long MAX_DEMAND = 10_000_000_000_000_000L;
 
     /** Clamp a demand to the canvas range [1, MAX_DEMAND]. */
     public static long clampDemand(long value) {
@@ -121,9 +125,9 @@ public final class RouteGraphMath {
         return override == null ? derived : clampDemand(override);
     }
 
-    /** Parse a typed quantity: digits only, at most 15 of them. Returns null when invalid or empty. */
+    /** Parse a typed quantity: digits only, at most 17 of them. Returns null when invalid or empty. */
     public static Long parseDemand(String text) {
-        if (text == null || !text.matches("[0-9]{1,15}")) return null;
+        if (text == null || !text.matches("[0-9]{1,17}")) return null;
         return clampDemand(Long.parseLong(text));
     }
 
@@ -140,7 +144,7 @@ public final class RouteGraphMath {
         if (amount < 10_000) return Long.toString(amount);
         if (amount < 1_000_000) return trim(amount / 1_000.0) + "k";
         if (amount < 1_000_000_000L) return trim(amount / 1_000_000.0) + "M";
-        if (amount < 1_000_000_000_000L) return trim(amount / 1_000_000_000.0) + "G";
+        if (amount < 10_000_000_000_000_000L) return trim(amount / 1_000_000_000.0) + "G";
         if (amount < 1_000_000_000_000_000L) return trim(amount / 1_000_000_000_000.0) + "T";
         return String.format(java.util.Locale.ROOT, "%.2e", (double) amount);
     }

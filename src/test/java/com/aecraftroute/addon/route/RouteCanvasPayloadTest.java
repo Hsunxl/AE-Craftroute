@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class RouteCanvasPayloadTest {
     List<RouteApply.Node> nodes(String name) {
         var nodes=new ArrayList<RouteApply.Node>();
-        for(int i=0;i<RouteCanvasPayload.MAX_NODES;i++)nodes.add(new RouteApply.Node(
+        for(int i=0;i<128;i++)nodes.add(new RouteApply.Node(
                 "{id:\"minecraft:iron_ingot\"}","a".repeat(64),name,"root/"+i));
         return nodes;
     }
@@ -33,6 +33,14 @@ class RouteCanvasPayloadTest {
             assertEquals(expected.path(),actual.get("p").getAsString());assertFalse(actual.has("n"));
         }
     }
+    @Test void recipeDraftSurvivesPayloadAndMalformedDraftIsRejected() {
+        var draft=new RouteView.Draft("minecraft:stone","crafting",
+                List.of(new RouteView.Stack("ore","ore",1)),List.of(new RouteView.Stack("stone","stone",1)),"note");
+        var node=new RouteApply.Node("stone","jei:minecraft:stone","stone","root",draft);
+        var round=RouteCanvasPayload.decode(RouteCanvasPayload.encode(1,List.of(node)));
+        assertEquals(draft,round.nodes().getFirst().draft());
+        assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.decode("{\"nodes\":[{\"d\":42}]}"));
+    }
     @Test void ordinaryCanvasKeepsDiagnosticNames() {
         var json=JsonParser.parseString(RouteCanvasPayload.encode(1,List.of(nodes("铁锭").getFirst()))).getAsJsonObject();
         assertEquals("铁锭",json.getAsJsonArray("nodes").get(0).getAsJsonObject().get("n").getAsString());
@@ -44,12 +52,15 @@ class RouteCanvasPayloadTest {
         assertTrue(result.problems().getFirst().contains("root/3"));
         assertFalse(result.problems().getFirst().contains("「null」"));
     }
-    @Test void tooManyBranchesOrOversizeConstraintsAreRejectedRatherThanSilentlyWeakened() {
-        var nodes=nodes("label");nodes.add(nodes.getFirst());
-        assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.encode(1,nodes));
-        var large=List.of(new RouteApply.Node("x".repeat(24001),"id","name","root"));
-        var error=assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.encode(1,large));
-        assertTrue(error.getMessage().contains("未应用任何分支"));
+    @Test void moreThan128BranchesRoundTripWhenTheyFitTheWire() {
+        var nodes=nodes("label");nodes.add(new RouteApply.Node("k","c","n","root/128"));
+        var round=RouteCanvasPayload.decode(RouteCanvasPayload.encode(1,nodes));
+        assertEquals(nodes.size(),round.nodes().size());
+        assertEquals("root/128",round.nodes().getLast().path());
+    }
+    @Test void largeConstraintsAreAvailableForChunkedTransfer() {
+        var large=List.of(new RouteApply.Node("x".repeat(30000),"id","name","root"));
+        assertTrue(RouteCanvasPayload.encode(1,large).length()>RouteCanvasPayload.MAX_CHARACTERS);
     }
     @Test void wireFormIsParsedWithExplicitTypeChecksInsteadOfRawGsonFailures() {
         var decoded=RouteCanvasPayload.decode("{\"amount\":7,\"nodes\":[{\"k\":\"{id:\\\"minecraft:iron_ingot\\\"}\",\"c\":\"abc\",\"p\":\"root\"}]}");
@@ -60,7 +71,7 @@ class RouteCanvasPayloadTest {
         // Round-trip of what encode actually wrote, including the compact (no label) form.
         var round=RouteCanvasPayload.decode(RouteCanvasPayload.encode(100_000,nodes("名".repeat(200))));
         assertEquals(100_000,round.amount());
-        assertEquals(RouteCanvasPayload.MAX_NODES,round.nodes().size());
+        assertEquals(128,round.nodes().size());
     }
     @Test void malformedWireFormIsRefusedByItsOwnMessageNotByTheGenericCatchAll() {
         assertEquals("画布数据为空",assertThrows(IllegalArgumentException.class,()->RouteCanvasPayload.decode(" ")).getMessage());

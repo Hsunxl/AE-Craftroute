@@ -24,6 +24,7 @@ class RouteRequestRulesTest {
     }
     @Test void pendingOperationsExpireRatherThanBlockingForever() {
         assertFalse(RouteRequestRules.expired(300,100));assertTrue(RouteRequestRules.expired(301,100));
+        assertFalse(RouteRequestRules.expiredApply(1000,100));assertTrue(RouteRequestRules.expiredApply(1001,100));
     }
     @Test void olderSequenceNeverReplacesANewerPreviewEvenForTheSameGoal() {
         assertFalse(RouteRequestRules.currentPlanResponse(4,5,"dust:1000","dust:1000"));

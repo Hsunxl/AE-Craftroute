@@ -46,8 +46,7 @@ public final class RouteScreen extends Screen {
     private static final int RED = 0xFF8E2F2F;
     private static final int PURPLE = 0xFF5A6E85;
     private static final int ROW_H = 32;
-    private static final int MAX_NODES = 512;
-    private static final int MAX_QUERIES = 48;
+    private static final int MAX_QUERY_IN_FLIGHT = 8;
 
     private final Screen parent;
     private AEKey originalTarget;
@@ -106,6 +105,7 @@ public final class RouteScreen extends Screen {
     private final RouteRecipeHover recipeHover=new RouteRecipeHover();
     private final Map<String, RouteView.Choice> branches = new LinkedHashMap<>();
     private final Map<String,String> appliedPathChoices=new LinkedHashMap<>();
+    private final Map<String,RouteView.Draft> appliedPathDrafts=new LinkedHashMap<>();
     private final Map<String, RouteView.Draft> branchDrafts = new LinkedHashMap<>();
     private final Deque<EditState> undo = new ArrayDeque<>();
     private final RouteBranchEdits branchEdits=new RouteBranchEdits();
@@ -408,10 +408,11 @@ public final class RouteScreen extends Screen {
     private int canvasMouseX=-1,canvasMouseY=-1;
     private Map<AEKey,Long> startupByKey=Map.of();
     private int choiceScroll;
-    private int queryCount;
     private static int nextSequence;
     private int latestPlanSequence;
     private final Map<Integer, Pending> pending = new HashMap<>();
+    private final Deque<RouteNetwork.Request> canvasChunks=new ArrayDeque<>();
+    private int canvasChunkSequence;
     private final Map<String, Material> materials = new LinkedHashMap<>();
     private final Map<String, int[]> offsets = new HashMap<>();
     private final List<MNode> materialNodes = new ArrayList<>();
@@ -587,7 +588,6 @@ public final class RouteScreen extends Screen {
         nodeMenu=false;recipeHover.clear();if(browser!=null)browser.clearMachineOverlay();
         pending.entrySet().removeIf(e->e.getValue().action.equals("query"));
         for(var material:materials.values()) {material.reply=null;material.loading=false;material.error=null;}
-        queryCount=0;
         try {
             if(RouteClient.recipeBrowser!=null) {
                 var fresh=RouteClient.recipeBrowser.get();var node=activeMaterial();
@@ -714,7 +714,6 @@ public final class RouteScreen extends Screen {
         materials.clear();
         offsets.clear();
         pending.clear();
-        queryCount = 0;
         centerPending = true;
         autoCenter = true;
         zoom = 1.0F;
@@ -791,11 +790,10 @@ public final class RouteScreen extends Screen {
     }
 
     private void query(AEKey key) {
-        if (key == null || queryCount >= MAX_QUERIES) return;
+        if (key == null || pending.values().stream().filter(p->p.action.equals("query")).count()>=MAX_QUERY_IN_FLIGHT) return;
         Material material = ensureMaterial(key);
         if (material.reply != null || material.loading || material.error != null) return;
         material.loading = true;
-        queryCount++;
         int sequence = send("query", key, "");
         if (sequence == 0) material.loading = false;
     }
@@ -835,6 +833,7 @@ public final class RouteScreen extends Screen {
             return;
         }
         Pending request = pending.get(response.sequence());
+        if(response.sequence()==canvasChunkSequence && !canvasChunks.isEmpty())canvasChunks.clear();
         if (request == null) {
             if(Boolean.getBoolean("aecraftroute.qa"))LOGGER.info("Route QA response without pending request: menu={}, sequence={}",menuId,response.sequence());
             return;
@@ -867,13 +866,28 @@ public final class RouteScreen extends Screen {
             reply = RouteNetwork.GSON.fromJson(response.json(), RouteView.Reply.class);
         } catch (Exception e) {
             status = "服务器返回的数据无法读取";
+            if(request.key!=null && request.action.equals("query")) {
+                var material=materials.get(keyId(request.key));
+                if(material!=null){material.loading=false;material.error=status;}
+                rebuildGraph();
+            }
             return;
         }
-        if (reply == null) return;
-        appliedPathChoices.clear();
+        if (reply == null) {
+            if(request.key!=null && request.action.equals("query")) {
+                var material=materials.get(keyId(request.key));
+                if(material!=null){material.loading=false;material.error="服务器返回空结果";}
+                rebuildGraph();
+            }
+            return;
+        }
+        appliedPathChoices.clear();appliedPathDrafts.clear();
         if(reply.canvas()!=null && Objects.equals(reply.canvas().target(),keyId(target))
                 && reply.canvas().amount()==Math.max(1,targetAmount) && reply.canvas().paths()!=null)
-            for(var p:reply.canvas().paths())appliedPathChoices.put(p.path(),p.choiceId());
+            for(var p:reply.canvas().paths()) {
+                appliedPathChoices.put(p.path(),p.choiceId());
+                if(p.draft()!=null)appliedPathDrafts.put(p.path(),p.draft());
+            }
         if(Boolean.getBoolean("aecraftroute.qa"))LOGGER.info("Route QA response: menu={}, sequence={}, action={}, verdict={}, message={}",menuId,response.sequence(),request.action,reply.plan()==null?null:reply.plan().verdict(),reply.message());
 
         if(request.action.equals("begin")) {
@@ -910,8 +924,7 @@ public final class RouteScreen extends Screen {
             root = null;
             selectedNode = null;
             selectedRecipe = null;
-            queryCount = 0;
-            if (target != null) {
+                if (target != null) {
                 ensureMaterial(target);
                 query(target);
             }
@@ -995,7 +1008,6 @@ public final class RouteScreen extends Screen {
      */
     private void applyCanvas() {
         if(expandingJei) {status="JEI 配方仍在展开；请等待完成";return;}
-        if(jeiTreeMode) {status="JEI 配方树尚未接入执行时样板匹配，未应用；请勿将草稿当作样板";return;}
         if (!canModify) { status = "请从自动合成确认界面进入修改模式"; return; }
         if (target == null) { status = "先设置最终产物，再整幅应用"; return; }
         var nodes = new ArrayList<com.aecraftroute.addon.route.RouteApply.Node>();
@@ -1003,7 +1015,8 @@ public final class RouteScreen extends Screen {
         for (var node : materialNodes) {
             var choice = node.preview == null ? null : node.preview.choice();
             if (choice == null || choice.id().startsWith("plan:") || node.material.key == null) { skipped++; continue; }
-            nodes.add(new com.aecraftroute.addon.route.RouteApply.Node(node.material.key,choice.id(),node.material.name,node.path));
+            nodes.add(new com.aecraftroute.addon.route.RouteApply.Node(node.material.key,choice.id(),node.material.name,node.path,
+                    branchDrafts.getOrDefault(node.path,appliedPathDrafts.get(node.path))));
         }
         if (nodes.isEmpty()) { status = "画布上还没有可应用的配方；先展开材料并选择样板"; return; }
         String argument;
@@ -1012,7 +1025,35 @@ public final class RouteScreen extends Screen {
         status = "正在证明强制画布：" + nodes.size() + " 个路径分支（每分支至少执行画布批次）"
                 + (skipped > 0 ? "（" + skipped + " 个节点没有可应用样板）" : "")
                ;
-        send("apply", target, argument);
+        if(argument.length()<=RouteCanvasPayload.MAX_CHARACTERS)send("apply",target,argument);
+        else sendLargeCanvas(argument);
+    }
+
+    private void sendLargeCanvas(String argument) {
+        var mc=Minecraft.getInstance();
+        if(mc.player==null || mc.player.containerMenu.containerId!=menuId) {status="终端已关闭，未发送画布";return;}
+        if(pending.values().stream().anyMatch(p->RouteRequestRules.mutation(p.action))) {status="上一项操作尚未完成";return;}
+        int sequence=++nextSequence;latestPlanSequence=sequence;
+        pending.entrySet().removeIf(e->e.getValue().action.equals("preview") || e.getValue().action.equals("apply"));
+        pending.put(sequence,new Pending(target,"apply",ticks,previewSignature()));
+        var chunks=RouteCanvasChunks.split(argument);
+        canvasChunks.clear();canvasChunkSequence=sequence;
+        for(int i=0;i<chunks.size();i++)canvasChunks.add(new RouteNetwork.Request(
+                menuId,sequence,"apply_chunk",target,i+"|"+chunks.size()+"|"+chunks.get(i)));
+        status="正在分 "+chunks.size()+" 片发送完整画布";
+    }
+    /** Bound network work per client tick. Never send a stale partial edit. */
+    private void pumpCanvasChunks() {
+        if(canvasChunks.isEmpty())return;
+        var request=pending.get(canvasChunkSequence);
+        var mc=Minecraft.getInstance();
+        if(request==null || !Objects.equals(request.signature,previewSignature()) || mc.player==null
+                || mc.player.containerMenu.containerId!=menuId) {
+            canvasChunks.clear();pending.remove(canvasChunkSequence);status="画布或终端已变化，停止发送；未应用";return;
+        }
+        pending.put(canvasChunkSequence,new Pending(request.key,request.action,ticks,request.signature));
+        for(int i=0;i<8 && !canvasChunks.isEmpty();i++)PacketDistributor.sendToServer(canvasChunks.removeFirst());
+        if(canvasChunks.isEmpty())status="完整画布已发送，等待服务器证明";
     }
 
     private void acceptPlan(RoutePlanView value) {
@@ -1126,7 +1167,6 @@ public final class RouteScreen extends Screen {
 
     private MNode buildNode(Material material, long demand, String path, int depth,
                             Set<String> ancestors) {
-        if (materialNodes.size() >= MAX_NODES) return null;
         if (depth > 0 && branchEdits.materialHidden(material.key)) {
             LOGGER.info("Skipping hidden material at {}: {}",path,material.key);
             return null;
@@ -1150,8 +1190,11 @@ public final class RouteScreen extends Screen {
                 : RouteGraphMath.preview(material.reply, draftFor(material.key));
         if(!jeiTreeMode && custom==null && appliedPathChoices.containsKey(path)) {
             var id=appliedPathChoices.get(path);RouteView.Choice matched=null;
-            if(material.reply!=null) for(var candidate:material.reply.choices())if(id.equals(candidate.id())){matched=candidate;break;}
-            node.preview=new RouteGraphMath.Preview(matched,true,false,material.reply==null?"正在读取已应用路径样板…":"已应用的强制路径（缺失时不改用别的配方）");
+            var appliedDraft=appliedPathDrafts.get(path);
+            if(appliedDraft!=null && id.equals("jei:"+appliedDraft.recipeId()))matched=draftChoice(appliedDraft);
+            if(matched==null && material.reply!=null) for(var candidate:material.reply.choices())if(id.equals(candidate.id())){matched=candidate;break;}
+            node.preview=new RouteGraphMath.Preview(matched,true,appliedDraft!=null,
+                    matched!=null?"已应用的服务端验证路径":material.reply==null?"正在读取已应用路径样板…":"已应用的强制路径（缺失时不改用别的配方）");
         }
         node.cycle = ancestors.contains(material.key);
         if(!jeiTreeMode && material.reply!=null && material.reply.stockOnly())node.preview=RouteGraphMath.preview(material.reply,null);
@@ -1159,7 +1202,7 @@ public final class RouteScreen extends Screen {
             node.preview = new RouteGraphMath.Preview(null, false, false, "回料引用：此处连接上层材料；可行性由服务端库存与执行顺序验证");
             return node;
         }
-        if (depth >= 24 || node.preview.choice() == null) return node;
+        if (node.preview.choice() == null) return node;
 
         RouteView.Choice choice = node.preview.choice();
         long output = RouteGraphMath.outputAmount(choice, material.key);
@@ -1182,7 +1225,7 @@ public final class RouteScreen extends Screen {
         ancestors.add(material.key);
         try {
             var grouped=RouteGraphMath.groupedInputs(choice.inputs());
-            for (int i = 0; i < grouped.size() && materialNodes.size() < MAX_NODES; i++) {
+            for (int i = 0; i < grouped.size(); i++) {
                 RouteView.Stack stack = grouped.get(i);
                 Material childMaterial = ensureMaterial(stack);
                 long childDemand;
@@ -1291,11 +1334,11 @@ public final class RouteScreen extends Screen {
     }
 
     private void requestMissing() {
-        if (jeiTreeMode || queryCount >= MAX_QUERIES) return;
+        if (jeiTreeMode) return;
         for (var node : new ArrayList<>(materialNodes)) {
             if (node.material.reply == null && !node.material.loading && node.material.error == null) {
                 query(node.material.renderKey);
-                if (queryCount >= MAX_QUERIES) break;
+                if (pending.values().stream().filter(p->p.action.equals("query")).count()>=MAX_QUERY_IN_FLIGHT) break;
             }
         }
     }
@@ -1765,7 +1808,6 @@ public final class RouteScreen extends Screen {
     private void drawFooter(GuiGraphics g) {
         int color = status != null && (status.startsWith("操作失败") || status.contains("失败")) ? RED : MUTED;
         String line=status == null ? "" : status;
-        if(materialNodes.size()>=MAX_NODES)line="已达 "+MAX_NODES+" 节点显示上限；"+line;
         text(g, line, windowBounds().left()+10, windowBounds().bottom()-18, windowBounds().width()-20, color);
     }
 
@@ -2173,7 +2215,7 @@ public final class RouteScreen extends Screen {
         if (quantityPath != null && (itemId == null || !itemId.isFocused())) {
             if (codePoint >= '0' && codePoint <= '9') {
                 if (quantityFresh) { quantityText = ""; quantityFresh = false; }
-                if (quantityText.length() < 15) quantityText += codePoint;
+                if (quantityText.length() < 17) quantityText += codePoint;
             }
             return true;
         }
@@ -2188,8 +2230,8 @@ public final class RouteScreen extends Screen {
             if(keyCode==GLFW.GLFW_KEY_A && hasControlDown())quantityFresh=true;
             else if(keyCode==GLFW.GLFW_KEY_V && hasControlDown()) {
                 String clipboard=Minecraft.getInstance().keyboardHandler.getClipboard().strip();
-                if(clipboard.matches("[0-9]{1,15}")) {quantityText=clipboard;quantityFresh=false;}
-                else status="数量只接受 1 至 15 位数字";
+                if(clipboard.matches("[0-9]{1,17}")) {quantityText=clipboard;quantityFresh=false;}
+                else status="数量只接受 1 至 17 位数字";
             }
             else if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) commitQuantity();
             else if (keyCode == GLFW.GLFW_KEY_ESCAPE) {cancelQuantity();status="已取消数量编辑";}
@@ -2275,19 +2317,24 @@ public final class RouteScreen extends Screen {
     public void tick() {
         super.tick();
         ticks++;
+        pumpCanvasChunks();
         var expired=new ArrayList<Pending>();
-        pending.entrySet().removeIf(e->{if(RouteRequestRules.expired(ticks,e.getValue().started)) {expired.add(e.getValue());return true;}return false;});
+        pending.entrySet().removeIf(e->{var request=e.getValue();
+            boolean timedOut="apply".equals(request.action)?RouteRequestRules.expiredApply(ticks,request.started):RouteRequestRules.expired(ticks,request.started);
+            if(timedOut) {expired.add(request);return true;}return false;});
         for(var request:expired) {
-            if(request.key!=null) {var m=materials.get(keyId(request.key));if(m!=null)m.loading=false;}
+            if(request.key!=null) {var m=materials.get(keyId(request.key));if(m!=null){m.loading=false;
+                if("query".equals(request.action))m.error="服务器未回应样板查询";}}
             if("preview".equals(request.action) || "apply".equals(request.action)) {
                 // No verdict arrived. Release the dedupe gate so the next rebuild asks again
                 // instead of leaving the authoritative panel blank for this target and amount.
                 lastPreviewSignature=null;
-                status="服务器未在 10 秒内确认规划；将重新询问，不会自动应用";
+                status="服务器未在预算内确认规划；请检查连接和服务端日志，不会自动应用";
             } else if("workbench".equals(request.action)) {
                 status="样板缓存刷新未收到服务器回应，稍后自动重试";
             } else if(RouteRequestRules.mutation(request.action))status="服务器未在 10 秒内确认；未自动重试，请检查缓存后再操作";
         }
+        if(expired.stream().anyMatch(p->"query".equals(p.action)))rebuildGraph();
         if(expandingJei) advanceJeiExpansion();
         if(browser!=null)browser.tick();
         recipeHover.tick();
@@ -2309,17 +2356,14 @@ public final class RouteScreen extends Screen {
             if(next==null) {
                 expandingJei=false;expansionBrowser=null;
                 long cycles=materialNodes.stream().filter(n->n.cycle).count();
-                long depth=materialNodes.stream().filter(n->!n.cycle && n.depth>=RouteGraphMath.MAX_PATH_DEPTH).count();
                 status="JEI 展开："+materialNodes.size()+" 个材料、"+recipeNodes.size()+" 个配方"
                         +(cycles>0?"；回环停止 "+cycles+" 处":"")
-                        +(depth>0?"；到达深度上限 "+depth+" 处，可能未展开":"")
-                        +(materialNodes.size()>=MAX_NODES?"；达到显示上限，未完全展开":"")
                         +(expansionErrors>0?"；JEI 读取失败 "+expansionErrors+" 处":"")
                         +"；仅预览，不绑定样板";
                 return;
             }
             expansionVisited.add(next.path);
-            if(next.cycle || next.depth>=RouteGraphMath.MAX_PATH_DEPTH || branchDrafts.containsKey(next.path))continue;
+            if(next.cycle || branchDrafts.containsKey(next.path))continue;
             try {
                 var found=expansionBrowser.lookupOutput(next.material.renderKey);
                 if(found.failed()){expansionErrors++;continue;}

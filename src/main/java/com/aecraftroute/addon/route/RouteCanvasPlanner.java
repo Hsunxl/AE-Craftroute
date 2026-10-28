@@ -12,6 +12,7 @@ public final class RouteCanvasPlanner {
             AEKey target,long amount,ProductionPlanner.Limits limits) {
         if(!Objects.equals(canvas.target(),target) || canvas.amount()!=amount)
             throw new ProductionPlanningException(INVALID,"强制画布只适用于应用时的目标与数量；请重新应用画布");
+        if(canvas.paths().stream().anyMatch(p->p.recipe()!=null))return planVerifiedCanvas(snapshot,canvas,target,amount,limits);
         long deadline=System.nanoTime()+limits.nanos();
         check(deadline);
         var all=new LinkedHashSet<IPatternDetails>();
@@ -74,7 +75,6 @@ public final class RouteCanvasPlanner {
             if(!allowed) continue;
             var variants=PatternVariants.enumerate(p,k->snapshot.stock().getOrDefault(k,0L),deadline);
             recipes.addAll(variants.recipes()); incomplete|=!variants.complete();
-            if(recipes.size()>8192) throw new ProductionPlanningException(LIMIT,"强制画布替代分配超过预算");
         }
         var branches=new ArrayList<ForcedRoutePlanner.Branch<PatternVariant>>();
         for(var path:paths.values()) {
@@ -96,6 +96,52 @@ public final class RouteCanvasPlanner {
             throw failure;
         }
         check(deadline);
+        return materialize(target,amount,proof);
+    }
+    /** Validate the path tree and derive all firing minimums from server-verified contracts. */
+    private static CertifiedCraftingPlan planVerifiedCanvas(RouteSnapshot.Result snapshot,RoutePolicy.Canvas<AEKey> canvas,
+            AEKey target,long amount,ProductionPlanner.Limits limits) {
+        long deadline=System.nanoTime()+limits.nanos();
+        var paths=new LinkedHashMap<String,RoutePolicy.Path<AEKey>>();
+        for(var path:canvas.paths()) {
+            check(deadline);
+            if(path.recipe()==null)throw new ProductionPlanningException(UNSUPPORTED,"暂不支持混合样板锁定与 JEI 配方契约");
+            if(!RouteGraphMath.validPath(path.path()) || paths.putIfAbsent(path.path(),path)!=null
+                    || !path.path().equals(path.recipe().path()) || !path.key().equals(path.recipe().output())
+                    || path.recipe().expectedDefinition()==null)
+                throw new ProductionPlanningException(INVALID,"配方路径或服务器验证契约无效");
+        }
+        var root=paths.get("root");
+        if(root==null || !target.equals(root.key()))throw new ProductionPlanningException(INVALID,"必须包含最终产物的 root 路径");
+        var demands=new HashMap<String,Long>();demands.put("root",amount);
+        var minimums=new LinkedHashMap<String,Long>();var contracts=new ArrayList<RecipePatternMapping.Recipe>();
+        var sorted=new ArrayList<>(paths.values());sorted.sort(Comparator.comparingInt(p->p.path().length()));
+        try {
+            for(var path:sorted) {
+                check(deadline);Long demand=demands.get(path.path());
+                if(demand==null)throw new ProductionPlanningException(INVALID,"孤立路径："+path.path());
+                var recipe=path.recipe();long output=recipe.outputs().getOrDefault(path.key(),0L);
+                if(output<=0)throw new ProductionPlanningException(INVALID,"配方不产出路径材料");
+                long count=1+(demand-1)/output;minimums.put(path.path(),count);contracts.add(recipe);
+                int index=0;
+                for(var entry:recipe.inputs().entrySet()) {
+                    String child=RouteGraphMath.childPath(path.path(),index++);var chosen=paths.get(child);
+                    if(chosen!=null && !chosen.key().equals(entry.getKey()))throw new ProductionPlanningException(INVALID,"路径输入材料已变化："+child);
+                    demands.put(child,Math.multiplyExact(entry.getValue(),count));
+                }
+            }
+        } catch(ArithmeticException overflow) {throw new ProductionPlanningException(LIMIT,"配方需求数量超出整数范围；未提交");}
+        return planMapped(snapshot,target,amount,contracts,minimums,new ProductionPlanner.Limits(limits.states(),remaining(deadline)));
+    }
+
+    /** Entry for a server-validated recipe contract; raw client/JEI drafts are not contracts. */
+    public static CertifiedCraftingPlan planMapped(RouteSnapshot.Result snapshot,AEKey target,long amount,
+            List<RecipePatternMapping.Recipe> recipes,Map<String,Long> minimums,ProductionPlanner.Limits limits) {
+        var proof=RecipePatternMapping.prove(target,amount,recipes,minimums,snapshot,limits);
+        return materialize(target,amount,proof);
+    }
+    private static CertifiedCraftingPlan materialize(AEKey target,long amount,
+            ForcedRoutePlanner.Proof<AEKey,PatternVariant> proof) {
         try {
             var used=new KeyCounter(); proof.used().forEach(used::add);
             var counts=new LinkedHashMap<IPatternDetails,Long>();

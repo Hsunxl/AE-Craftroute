@@ -300,7 +300,8 @@ public final class RoutePlanningService {
         return planFrozen(snapshot,policy,key,amount,new ProductionPlanner.Limits(states,RouteCanvasPlanner.remaining(deadline)));
     }
     @SubscribeEvent public static void tick(ServerTickEvent.Post event) {
-        tickJobs(JOBS,System.nanoTime()+TICK_NANOS);
+        long now=System.nanoTime();RouteNetwork.expireChunks(now);
+        tickJobs(JOBS,now+TICK_NANOS);
         var active=workers;
         if(active!=null)active.purge();
     }

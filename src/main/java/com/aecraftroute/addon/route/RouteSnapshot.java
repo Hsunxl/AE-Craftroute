@@ -10,7 +10,6 @@ import static com.aecraftroute.addon.planner.ProductionPlanningException.Reason.
 
 /** Server-thread capture, shared by previews and real CPU requests. No worker reads a grid. */
 public final class RouteSnapshot {
-    private static final int KEY_BUDGET=512, PATTERN_BUDGET=2048;
     public record Result(Map<AEKey,List<IPatternDetails>> patterns,Map<AEKey,Long> stock,
                          Map<IPatternDetails,String> identities) {
         public Result { var copy=new LinkedHashMap<AEKey,List<IPatternDetails>>(); patterns.forEach((k,v)->copy.put(k,List.copyOf(v))); patterns=Map.copyOf(copy); stock=Map.copyOf(stock); identities=Map.copyOf(identities); }
@@ -59,7 +58,6 @@ public final class RouteSnapshot {
                         allowed.add(pattern);
                         if(policy.canvas()!=null) identity(pattern,false);
                         if(visited.add(pattern)) {
-                            if(visited.size()>PATTERN_BUDGET)throw new ProductionPlanningException(LIMIT,"候选样板超过快照预算；不是缺料");
                             for(var input:inputs) {
                                 if(input==null)throw new ProductionPlanningException(UNSUPPORTED,"样板输入为空");
                                 var possible=input.getPossibleInputs();
@@ -83,7 +81,6 @@ public final class RouteSnapshot {
             }
             while(!queue.isEmpty()) {
                 var key=queue.removeFirst();if(patterns.containsKey(key))continue;
-                if(patterns.size()>=KEY_BUDGET)throw new ProductionPlanningException(LIMIT,"配方图超过快照预算；不是缺料");
                 current=key;allowed=new ArrayList<>();var raw=List.copyOf(grid.getCraftingService().getCraftingFor(key));observed.put(key,raw);candidates=raw.iterator();return false;
             }
             // Always take authoritative live stock once. Native provider traversal cannot be

@@ -9,7 +9,7 @@ class RouteCanvasBranchesTest {
         assertEquals("root/0/2",RouteGraphMath.childPath(RouteGraphMath.childPath("root",0),2));
         assertNotEquals(RouteGraphMath.childPath("root",0),RouteGraphMath.childPath("root",1));
         assertThrows(IllegalArgumentException.class,()->RouteGraphMath.childPath("root",-1));
-        assertThrows(IllegalArgumentException.class,()->RouteGraphMath.childPath("root",1000));
+        assertEquals("root/1000",RouteGraphMath.childPath("root",1000));
         assertThrows(IllegalArgumentException.class,()->RouteGraphMath.childPath("root/hash#0",1));
     }
     @Test void nineIdenticalSlotsBecomeOneBranchWithNineCount() {

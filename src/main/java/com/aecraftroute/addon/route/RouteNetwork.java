@@ -25,7 +25,7 @@ public final class RouteNetwork {
     }
     public record Request(int menu, int sequence, String action, AEKey key, String argument) implements CustomPacketPayload {
         public Request {
-            if(action==null || argument==null || argument.length()>(action.equals("encode")||action.equals("apply")?RouteCanvasPayload.MAX_CHARACTERS:Set.of("workbench","takecache","upload","discardcache").contains(action)?1024:128))
+            if(action==null || argument==null || argument.length()>(action.equals("encode")||action.equals("apply")||action.equals("apply_chunk")?RouteCanvasPayload.MAX_CHARACTERS:Set.of("workbench","takecache","upload","discardcache").contains(action)?1024:128))
                 throw new IllegalArgumentException("路线操作参数超过限制");
         }
         public static final Type<Request> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("aecraftroute", "route_request"));
@@ -80,6 +80,18 @@ public final class RouteNetwork {
                         }
                     }
                     context.reply(new Response(request.menu(),request.sequence(),GSON.toJson(RouteWorkbench.view(player,menu,grid,view,message))));
+                    return;
+                }
+                if("apply_chunk".equals(request.action())) {
+                    var data=request.argument();int a=data.indexOf('|'),b=a<0?-1:data.indexOf('|',a+1);
+                    if(a<1 || b<a+2)throw new IllegalArgumentException("画布分片头无效");
+                    int index=Integer.parseInt(data.substring(0,a)),count=Integer.parseInt(data.substring(a+1,b));
+                    if(index==0)PLANNING.cancel(player.getUUID());
+                    var complete=CHUNKS.accept(player.getUUID(),menu.containerId,request.sequence(),request.key(),index,count,data.substring(b+1),System.nanoTime());
+                    if(complete!=null) {
+                        var apply=new Request(request.menu(),request.sequence(),"apply",request.key(),"");
+                        planAsync(context,apply,player,menu,grid,RouteSessions.get(grid,player.getUUID()),complete);
+                    }
                     return;
                 }
                 var policy = RouteSessions.get(grid, player.getUUID());
@@ -172,10 +184,16 @@ public final class RouteNetwork {
         });
     }
     private static final RoutePlanningRequests<UUID> PLANNING=new RoutePlanningRequests<>();
-    static void cancelPlanning(UUID player) {PLANNING.cancel(player);}
-    static void clearPlanning() {PLANNING.clear();}
+    private static final RouteCanvasChunks<AEKey> CHUNKS=new RouteCanvasChunks<>();
+    static void cancelPlanning(UUID player) {PLANNING.cancel(player);CHUNKS.cancel(player);}
+    static void clearPlanning() {PLANNING.clear();CHUNKS.clear();}
+    static void expireChunks(long now) {CHUNKS.expire(now);}
     private static void planAsync(IPayloadContext context,Request request,ServerPlayer player,AEBaseMenu menu,
                                   appeng.api.networking.IGrid grid,RoutePolicy<AEKey> base) {
+        planAsync(context,request,player,menu,grid,base,request.argument());
+    }
+    private static void planAsync(IPayloadContext context,Request request,ServerPlayer player,AEBaseMenu menu,
+                                  appeng.api.networking.IGrid grid,RoutePolicy<AEKey> base,String argument) {
         var ticket=PLANNING.replace(player.getUUID(),request.sequence());
         if(ticket==null)return;
         long amount=1;java.util.List<RouteApply.Node> nodes=java.util.List.of();
@@ -183,7 +201,7 @@ public final class RouteNetwork {
             // The argument is untrusted client text: parse it with explicit type checks so a
             // malformed or edited request is refused by its own message instead of surfacing
             // as a raw Gson failure behind the generic "操作失败" reply.
-            var decoded=RouteCanvasPayload.decode(request.argument());
+            var decoded=RouteCanvasPayload.decode(argument);
             amount=decoded.amount();nodes=decoded.nodes();
             RouteRequestRules.requirePlanAmount(amount);
             if(request.key()==null)throw new IllegalArgumentException("先选择目标材料");
@@ -194,7 +212,7 @@ public final class RouteNetwork {
                 if(!Objects.equals(request.key(),confirm.aecraftroute$routeWhatToCraft()) || amount!=confirm.aecraftroute$routeAmount())
                     throw new IllegalArgumentException("画布目标或数量与当前合成确认页不同；请从对应的确认页重新打开");
             }
-            var prepared=apply?RouteApply.prepare(grid,base,player.registryAccess(),request.key(),amount,nodes)
+            var prepared=apply?RouteApply.prepare(grid,base,player.registryAccess(),request.key(),amount,nodes,player)
                     :new RouteApply.Prepared(base,List.of(),List.of());
             if(!prepared.problems().isEmpty())throw new IllegalArgumentException(String.join("；",prepared.problems()));
             long want=amount;
@@ -207,7 +225,7 @@ public final class RouteNetwork {
                 return node!=null && node.isActive() && node.getGrid()==grid;
             };
             var future=RoutePlanningService.planAsync(grid,prepared.policy(),player.registryAccess(),request.key(),want,
-                    new com.aecraftroute.addon.planner.ProductionPlanner.Limits(apply?12000:6000,apply?3_000_000_000L:2_000_000_000L),valid);
+                    new com.aecraftroute.addon.planner.ProductionPlanner.Limits(apply?150_000:30_000,apply?30_000_000_000L:8_000_000_000L),valid);
             PLANNING.bind(player.getUUID(),ticket,future);
             future.whenComplete((plan,error)->{
                 if(!valid.getAsBoolean()) {if(PLANNING.current(player.getUUID(),ticket))PLANNING.forget(player.getUUID(),ticket);return;}
@@ -248,6 +266,16 @@ public final class RouteNetwork {
                 if(key!=null && amount>0) reply=reply.withRequestTarget(new RouteView.RequestTarget(key.toTagGeneric(player.registryAccess()).toString(),amount));
             }
         }
-        context.reply(new Response(req.menu(),req.sequence(),GSON.toJson(reply)));
+        String encoded=GSON.toJson(reply);
+        if(encoded.length()>190_000 && reply.canvas()!=null) {
+            // Never let an oversized echo turn a successfully committed plan into a
+            // transport exception. The server policy is authoritative; omit only
+            // this optional echo, not any constraint or the plan itself.
+            reply=new RouteView.Reply((reply.message()==null?"":reply.message())+"；画布已保存，路径回显过大已省略",
+                    reply.choices(),reply.locked(),reply.banned(),reply.stockOnly(),reply.ruleCount(),true,
+                    reply.plan(),null,reply.requestTarget());
+            encoded=GSON.toJson(reply);
+        }
+        context.reply(new Response(req.menu(),req.sequence(),encoded));
     }
 }

@@ -130,7 +130,7 @@ tasks.named('compileTestJava') { dependsOn 'createMinecraftArtifacts' }
 def selftestReceipt = layout.projectDirectory.file('run-selftest/selftest-result.txt').asFile
 def selectedSelftestTask = providers.gradleProperty('selftestTask').getOrElse('growth')
 def expectedSelftestResult = 'PASS task=' + selectedSelftestTask
-  def supportedSelftestTasks = ['growth', 'cancel', 'reload', 'restart1', 'restart2', 'advanced-restart1', 'advanced-restart2',
+  def supportedSelftestTasks = ['growth', 'mapped-growth', 'mapped-canvas', 'cancel', 'reload', 'restart1', 'restart2', 'advanced-restart1', 'advanced-restart2',
     'paths', 'vanilla', 'vanilla-canvas', 'vanilla-canvas-advanced', 'scaled-advanced', 'planning-load',
     'scaled-native-plan', 'scaled-processing-execution', 'scaled-processing-plain-execution', 'scaled-strict-roundtrip', 'scaled-molecular-execution',
     'foreign', 'foreign-advanced', 'foreign-advanced-plus',

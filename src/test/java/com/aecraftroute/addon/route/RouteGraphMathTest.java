@@ -14,15 +14,14 @@ class RouteGraphMathTest {
         assertNull(RouteGraphMath.parentPath("foreign-root"));
         assertEquals("root/1",RouteGraphMath.parentPath("root/1/2"));
     }
-    @Test void acceptedServerPathDepthMatchesLastClientGeneratedChild() {
+    @Test void deepPathsAreAcceptedWithoutRegexStackGrowth() {
         String path="root";
-        for(int depth=1;depth<=RouteGraphMath.MAX_PATH_DEPTH;depth++) {
-            path=RouteGraphMath.childPath(path,0);
-            assertTrue(RouteGraphMath.validPath(path));
-        }
-        String terminal=path;
-        assertThrows(IllegalArgumentException.class,()->RouteGraphMath.childPath(terminal,0));
-        assertFalse(RouteGraphMath.validPath(path+"/0"));
+        for(int depth=1;depth<=2000;depth++)path=RouteGraphMath.childPath(path,0);
+        assertTrue(RouteGraphMath.validPath(path));assertTrue(RouteGraphMath.canExtendPath(path));
+        assertFalse(RouteGraphMath.validPath(path+"/"));
+        assertTrue(RouteGraphMath.validPath(path+"/1234"));
+        assertFalse(RouteGraphMath.validPath(path+"/2147483648"));
+        assertFalse(RouteGraphMath.validPath("rootx/0"));
     }
     private static RouteView.Stack stack(String key, long amount) {
         return new RouteView.Stack(key, key, amount);
@@ -135,7 +134,8 @@ class RouteGraphMathTest {
         assertNull(RouteGraphMath.parseDemand("99999999999999999999"));
         assertEquals(Long.valueOf(1), RouteGraphMath.parseDemand("0"));
         assertEquals(Long.valueOf(12), RouteGraphMath.parseDemand("12"));
-        assertEquals(Long.valueOf(RouteGraphMath.MAX_DEMAND), RouteGraphMath.parseDemand("999999999999999"));
+        assertEquals(Long.valueOf(999_999_999_999_999L), RouteGraphMath.parseDemand("999999999999999"));
+        assertEquals(Long.valueOf(RouteGraphMath.MAX_DEMAND),RouteGraphMath.parseDemand("10000000000000000"));
     }
 
     @Test

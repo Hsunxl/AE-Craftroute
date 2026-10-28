@@ -39,7 +39,6 @@ public final class NetworkProductionPlanner {
             while(!queue.isEmpty()) {
                 remaining(started,limits);
                 var key=queue.remove(); if(!visited.add(key)) continue;
-                if(visited.size()>512) throw new ProductionPlanningException(LIMIT,"配方图超过计算预算；尚未判定是否可合成，不是缺料");
                 snapshot.put(key,Math.max(0,stock.apply(key)));
                 var choices=source.apply(key);
                 if(choices==null) continue;
@@ -47,7 +46,6 @@ public final class NetworkProductionPlanner {
                     remaining(started,limits);
                     com.aecraftroute.addon.compat.ScaledPatternCompat.validate(pattern);
                     if(!patterns.add(pattern)) continue;
-                    if(patterns.size()>2048) throw new ProductionPlanningException(LIMIT,"候选样板超过计算预算；不是缺料");
                     for(var input:pattern.getInputs()) {
                         var options=input.getPossibleInputs();
                         if(options!=null) for(var option:options) if(option!=null && option.what()!=null && option.amount()>0) {
@@ -62,7 +60,6 @@ public final class NetworkProductionPlanner {
                     }
                     var variants=PatternVariants.enumerate(pattern,stock,deadline);
                     incomplete |= !variants.complete();
-                    if(recipes.size()+variants.recipes().size()>8192) { incomplete=true; continue; }
                     recipes.addAll(variants.recipes());
                 }
             }

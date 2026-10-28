@@ -112,7 +112,7 @@ public final class CraftRouteCrafting {
                         .map(player -> (net.minecraft.core.HolderLookup.Provider) player.registryAccess())
                         .orElse(server.registryAccess());
                 var inner=com.aecraftroute.addon.route.RoutePlanningService.planAsync(grid,policy,registries,what,amount,
-                        new com.aecraftroute.addon.planner.ProductionPlanner.Limits(30_000,5_000_000_000L),
+                        new com.aecraftroute.addon.planner.ProductionPlanner.Limits(150_000,30_000_000_000L),
                         ()->com.aecraftroute.addon.route.RouteSessions.get(grid,requester).equals(policy));
                 result.whenComplete((p,e)->{if(result.isCancelled())inner.cancel(true);});
                 inner.whenComplete((p,e)->{if(e==null)result.complete(p);else result.completeExceptionally(e);});
