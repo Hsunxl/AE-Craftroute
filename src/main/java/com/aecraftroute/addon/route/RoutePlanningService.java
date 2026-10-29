@@ -119,6 +119,8 @@ public final class RoutePlanningService {
     static final class Job {
         final CaptureWork capture; final ExecutorService executor; final RoutePolicy<AEKey> policy; final AEKey key;
         final IGrid gridRef;
+        java.util.function.Consumer<RoutePlanningProgress> progress = p -> {};
+        long progressRevision,lastProgressAt;
         final long amount,deadline; final int states; final BooleanSupplier valid;
         final long createdAt=System.nanoTime();
         volatile Phase phase=Phase.CAPTURE,errorPhase;
@@ -258,6 +260,11 @@ public final class RoutePlanningService {
     }
     public static CompletableFuture<CertifiedCraftingPlan> planAsync(IGrid grid,RoutePolicy<AEKey> policy,
             HolderLookup.Provider registries,AEKey key,long amount,ProductionPlanner.Limits limits,BooleanSupplier valid) {
+        return planAsync(grid,policy,registries,key,amount,limits,valid,p -> {});
+    }
+    public static CompletableFuture<CertifiedCraftingPlan> planAsync(IGrid grid,RoutePolicy<AEKey> policy,
+            HolderLookup.Provider registries,AEKey key,long amount,ProductionPlanner.Limits limits,BooleanSupplier valid,
+            java.util.function.Consumer<RoutePlanningProgress> progress) {
         var server=ServerLifecycleHooks.getCurrentServer();
         if(server==null)return CompletableFuture.failedFuture(new ProductionPlanningException(INVALID,"服务器已停止"));
         var outer=new CompletableFuture<CertifiedCraftingPlan>();
@@ -265,7 +272,7 @@ public final class RoutePlanningService {
             if(outer.isCancelled())return;
             if(JOBS.size()>=32){outer.completeExceptionally(new ProductionPlanningException(LIMIT,"规划队列已满；不是缺料"));return;}
             try {
-                var job=new Job(grid,policy,registries,key,amount,limits,valid);JOBS.add(job);
+                var job=new Job(grid,policy,registries,key,amount,limits,valid);job.progress=Objects.requireNonNull(progress);JOBS.add(job);
                 outer.whenComplete((p,e)->{if(outer.isCancelled())job.result.cancel(true);});
                 job.result.whenComplete((p,e)->{if(e!=null)outer.completeExceptionally(e);else outer.complete(p);});
             } catch(Throwable failure) {outer.completeExceptionally(failure);}
@@ -310,7 +317,16 @@ public final class RoutePlanningService {
         int count=jobs.size();
         for(int i=0;i<count && !jobs.isEmpty() && System.nanoTime()<end;i++) {
             var job=jobs.remove(0);job.tick(Math.min(end,System.nanoTime()+SLICE_NANOS));
-            if(!job.result.isDone())jobs.add(job);
+            if(!job.result.isDone()) {
+                jobs.add(job);
+                long now=System.nanoTime();
+                if(now-job.lastProgressAt>=200_000_000L && job.valid.getAsBoolean()) {
+                    job.lastProgressAt=now;
+                    try {job.progress.accept(new RoutePlanningProgress(0,++job.progressRevision,job.phase.label,
+                            Math.max(0,(now-job.createdAt)/1_000_000L),false));}
+                    catch(RuntimeException ignored) { /* Progress cannot change a proof outcome. */ }
+                }
+            }
         }
     }
     static void cancelJobs(List<Job> jobs) {

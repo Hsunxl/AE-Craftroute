@@ -225,7 +225,10 @@ public final class RouteNetwork {
                 return node!=null && node.isActive() && node.getGrid()==grid;
             };
             var future=RoutePlanningService.planAsync(grid,prepared.policy(),player.registryAccess(),request.key(),want,
-                    new com.aecraftroute.addon.planner.ProductionPlanner.Limits(apply?150_000:30_000,apply?30_000_000_000L:8_000_000_000L),valid);
+                    new com.aecraftroute.addon.planner.ProductionPlanner.Limits(apply?150_000:30_000,apply?30_000_000_000L:8_000_000_000L),valid,progress->{
+                        if(valid.getAsBoolean())context.reply(new Response(request.menu(),request.sequence(),
+                                GSON.toJson(java.util.Map.of("planningProgress",progress))));
+                    });
             PLANNING.bind(player.getUUID(),ticket,future);
             future.whenComplete((plan,error)->{
                 if(!valid.getAsBoolean()) {if(PLANNING.current(player.getUUID(),ticket))PLANNING.forget(player.getUUID(),ticket);return;}

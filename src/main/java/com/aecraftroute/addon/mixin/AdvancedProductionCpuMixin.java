@@ -91,9 +91,10 @@ public abstract class AdvancedProductionCpuMixin implements com.aecraftroute.add
 
     @WrapOperation(method="executeCrafting",at=@At(value="INVOKE",target="Lappeng/api/networking/crafting/ICraftingProvider;pushPattern(Lappeng/api/crafting/IPatternDetails;[Lappeng/api/stacks/KeyCounter;)Z"))
     private boolean aecraftroute$accepted(ICraftingProvider provider,IPatternDetails pattern,KeyCounter[] inputs,Operation<Boolean> original) {
-        if(aecraftroute$production!=null && !aecraftroute$production.allows(pattern)) return false;
-        boolean accepted=original.call(provider,pattern,inputs);
-        if(accepted && aecraftroute$production!=null) { aecraftroute$production.accepted(pattern); aecraftroute$dispatchLogs.reset(); cpu.markDirty(); }
+        var production=aecraftroute$production;
+        if(production==null)return original.call(provider,pattern,inputs);
+        boolean accepted=production.dispatch(pattern,inputs,()->cpu.markDirty(),()->original.call(provider,pattern,inputs));
+        if(accepted) { aecraftroute$dispatchLogs.reset(); }
         else if(!accepted && aecraftroute$production!=null && aecraftroute$dispatchLogs.acquireDelayed("refused"))
             com.aecraftroute.addon.CraftRouteAddon.LOGGER.warn(
                     "[AE-Craftroute] AdvancedAE certified dispatch refused by provider {} for the current step",

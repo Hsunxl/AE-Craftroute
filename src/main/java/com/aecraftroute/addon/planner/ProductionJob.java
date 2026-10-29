@@ -131,6 +131,20 @@ public final class ProductionJob {
         if(!allows(p)) throw new IllegalStateException("Uncertified dispatch");
         cursor.accepted(cursor.current());
     }
+    /** Pins the job and cursor across provider callbacks. No rejection advances
+     * the program; a receipt/true return advances it exactly once. */
+    public boolean dispatch(IPatternDetails pattern,KeyCounter[] inputs,Runnable dirty,
+            java.util.function.BooleanSupplier provider) {
+        if(!allows(pattern))return false;
+        Objects.requireNonNull(inputs,"input holders");
+        for(var holder:inputs)Objects.requireNonNull(holder,"input holder");
+        Objects.requireNonNull(dirty,"dirty callback");
+        var before=cursor.position();
+        return com.aecraftroute.addon.compat.CertifiedDispatchScope.dispatch(this,pattern,inputs,()->{
+            if(!cursor.position().equals(before))throw new IllegalStateException("Dispatch cursor changed during provider call");
+            accepted(pattern);dirty.run();
+        },()->{invalid=true;dirty.run();},provider);
+    }
     public KeyCounter[] extract(IPatternDetails p,ICraftingInventory inventory,Level level,KeyCounter outputs,KeyCounter containers) {
         if(!allows(p)) return null;
         var variant=cursor.current(); var slots=variant.slots();

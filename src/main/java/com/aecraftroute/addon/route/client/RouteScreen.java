@@ -826,6 +826,7 @@ public final class RouteScreen extends Screen {
         return sequence;
     }
 
+    private com.aecraftroute.addon.route.RoutePlanningProgress planningProgress;
     public void accept(RouteNetwork.Response response) {
         if (response.menu() != menuId) {
             // Belongs to another menu generation; log it so a mismatched reply is never invisible.
@@ -848,6 +849,25 @@ public final class RouteScreen extends Screen {
             if(Boolean.getBoolean("aecraftroute.qa"))LOGGER.info("Route QA stale plan response: menu={}, sequence={}, action={}",menuId,response.sequence(),request.action);
             return;
         }
+        try {
+            var update=com.google.gson.JsonParser.parseString(response.json()).getAsJsonObject();
+            if(update.has("planningProgress")) {
+                var progress=RouteNetwork.GSON.fromJson(update.get("planningProgress"),com.aecraftroute.addon.route.RoutePlanningProgress.class);
+                var incoming=new com.aecraftroute.addon.route.RoutePlanningProgress(response.sequence(),progress.revision(),progress.phase(),progress.elapsedMillis(),false);
+                if(incoming.supersedes(planningProgress)) {
+                    planningProgress=incoming;
+                    String phase=switch(progress.phase()) {
+                        case "capture" -> "抓取网络";
+                        case "worker queue" -> "等待计算";
+                        case "worker computation" -> "搜索与认证";
+                        case "validation" -> "校验当前库存";
+                        default -> progress.phase();
+                    };
+                    status="规划中 · "+phase+" · "+progress.elapsedMillis()+" ms";
+                }
+                return; // Intermediate updates retain the pending request.
+            }
+        } catch(RuntimeException ignored) { /* Final parser reports malformed data. */ }
         pending.remove(response.sequence());
         RouteView.Reply reply;
         try {

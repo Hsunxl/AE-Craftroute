@@ -44,19 +44,24 @@ public final class ProductionPlanner<K, R> {
         public static Limits defaults() { return new Limits(30_000, 3_000_000_000L); }
     }
     private final List<K> keys;
+    private final Map<K,Integer> keyIndexes=new HashMap<>();
     private final List<Recipe<K,R>> recipes;
     private final Map<R,Integer> recipeIds = new HashMap<>();
-    private final BigInteger[][] inputs, outputs, deltas;
+    private final SparseAmounts[] inputs, outputs, deltas;
     private final int[][] outputKeyIndices;
+    private final int[][] touchedKeyIndices;
     private final BigInteger[] stock;
     private final boolean[] produced;
     private final Limits limits;
+    private final boolean allowSccCandidate;
     private long started, serial;
     private boolean clipped;
     private CompiledProductionGraph compiled;
     private boolean dagFastPath;
     boolean dagFastPathUsed(){return dagFastPath;}
     private boolean resourceBound;
+    private boolean sccFastPath;
+    boolean sccFastPathUsed(){return sccFastPath;}
     boolean resourceBoundUsed(){return resourceBound;}
     private final Deque<Node> fair = new ArrayDeque<>();
     private final class Node {
@@ -70,13 +75,18 @@ public final class ProductionPlanner<K, R> {
         Node(BigInteger[] n, Node p, Block<R> b) { need=n; next=p; block=b; score=score(n); }
     }
     public ProductionPlanner(Collection<Recipe<K,R>> source, Map<K,Long> available, Limits limits) {
+        this(source,available,limits,true);
+    }
+    ProductionPlanner(Collection<Recipe<K,R>> source, Map<K,Long> available, Limits limits, boolean allowSccCandidate) {
+        this.allowSccCandidate=allowSccCandidate;
         this.recipes = List.copyOf(source); this.limits = limits;
         LinkedHashSet<K> all = new LinkedHashSet<>(available.keySet());
         for (var r : recipes) { all.addAll(r.inputs.keySet()); all.addAll(r.outputs.keySet()); }
-        keys = List.copyOf(all); stock = vector(); produced = new boolean[keys.size()];
-        inputs = new BigInteger[recipes.size()][]; outputs = new BigInteger[recipes.size()][];
-        deltas = new BigInteger[recipes.size()][];
+        keys = List.copyOf(all); for(int i=0;i<keys.size();i++)keyIndexes.put(keys.get(i),i); stock = vector(); produced = new boolean[keys.size()];
+        inputs = new SparseAmounts[recipes.size()]; outputs = new SparseAmounts[recipes.size()];
+        deltas = new SparseAmounts[recipes.size()];
         outputKeyIndices = new int[recipes.size()][];
+        touchedKeyIndices = new int[recipes.size()][];
         for (int i=0;i<keys.size();i++) {
             long n=available.getOrDefault(keys.get(i),0L);
             if (n<0) throw new IllegalArgumentException("Negative stock");
@@ -84,15 +94,12 @@ public final class ProductionPlanner<K, R> {
         }
         for (int r=0;r<recipes.size();r++) {
             if (recipeIds.put(recipes.get(r).id,r)!=null) throw new IllegalArgumentException("Duplicate recipe id");
-            inputs[r]=vector(recipes.get(r).inputs); outputs[r]=vector(recipes.get(r).outputs);
-            var indices=new int[recipes.get(r).outputs.size()]; int index=0;
-            for(int k=0;k<keys.size();k++) if(outputs[r][k].signum()>0) indices[index++]=k;
-            outputKeyIndices[r]=indices;
-            deltas[r]=vector();
-            for(int k=0;k<keys.size();k++) {
-                produced[k] |= outputs[r][k].signum()>0;
-                deltas[r][k]=outputs[r][k].subtract(inputs[r][k]);
-            }
+            inputs[r]=sparse(recipes.get(r).inputs); outputs[r]=sparse(recipes.get(r).outputs);
+            outputKeyIndices[r]=outputs[r].keys.clone();
+            touchedKeyIndices[r]=java.util.stream.IntStream.concat(
+                    Arrays.stream(inputs[r].keys),Arrays.stream(outputs[r].keys)).distinct().sorted().toArray();
+            deltas[r]=SparseAmounts.difference(outputs[r],inputs[r]);
+            for(int k:outputKeyIndices[r]) produced[k]=true;
         }
     }
     private BigInteger[] vector() { var v=new BigInteger[keys.size()]; Arrays.fill(v,ZERO); return v; }
@@ -120,8 +127,21 @@ public final class ProductionPlanner<K, R> {
                 .max(goal[k].subtract(delta[k].multiply(n))).max(ZERO);
         return result;
     }
-    private BigInteger[] delta(int r) {
+    private SparseAmounts delta(int r) {
         return deltas[r];
+    }
+    private SparseAmounts sparse(Map<K,Long> amounts) {
+        var values=new HashMap<Integer,BigInteger>();
+        amounts.forEach((k,v)->values.put(keyIndexes.get(k),BigInteger.valueOf(v)));
+        return new SparseAmounts(values);
+    }
+    private long jump(BigInteger[] goal,SparseAmounts d) {
+        BigInteger count=ONE;
+        for(int k:d.keys) if(d.get(k).signum()>0 && goal[k].compareTo(stock[k])>0) {
+            var n=goal[k].subtract(stock[k]);count=count.max(n.add(d.get(k)).subtract(ONE).divide(d.get(k)));
+        }
+        if(count.compareTo(MAX_COUNT)>0) {clipped=true;return 1;}
+        return count.longValueExact();
     }
     private long jump(BigInteger[] goal, BigInteger[] d) {
         BigInteger count=ONE;
@@ -188,6 +208,11 @@ public final class ProductionPlanner<K, R> {
         var recipeDistances=new int[recipes.size()]; Arrays.fill(recipeDistances,Integer.MAX_VALUE);
         var keyOrder=new ArrayList<Integer>();
         var graph=compiled(allowance);if(graph==null)return result;
+        // Do not let impossible, unseeded alternatives create phantom demand
+        // and divert the stock needed by a viable ring. Presence is optimistic:
+        // reachable does NOT mean enough stock, nor an executable plan.
+        var reachable=SeedReachability.reachableRecipes(graph,stock,()->probeExpired(allowance));
+        if(reachable==null)return result;
         var inputIndices=graph.inputKeys;var outputIndices=graph.outputKeys;
         var producers=graph.producers;var numericProgram=graph.bytecode;
         var pending=new ArrayDeque<Integer>(); pending.add(target); distances[target]=0;
@@ -199,6 +224,7 @@ public final class ProductionPlanner<K, R> {
             keyOrder.add(key);
             for(int r:producers[key]) {
                 if(probeExpired(allowance)) return result;
+                if(!reachable[r])continue;
                 recipeDistances[r]=Math.min(recipeDistances[r],distances[key]);
                 for(int k:inputIndices[r]) {
                     if(probeExpired(allowance)) return result;
@@ -211,7 +237,7 @@ public final class ProductionPlanner<K, R> {
         var candidates=new ArrayList<Integer>();
         for(int r=0;r<recipes.size();r++) {
             if(probeExpired(allowance)) return result;
-            if(recipeDistances[r]!=Integer.MAX_VALUE) candidates.add(r);
+            if(reachable[r] && recipeDistances[r]!=Integer.MAX_VALUE) candidates.add(r);
         }
         candidates.sort(Comparator.comparingInt((Integer r)->recipeDistances[r]).thenComparingInt(r->r));
         var actual=new long[stock.length];
@@ -221,7 +247,8 @@ public final class ProductionPlanner<K, R> {
         }
         var blocks=new ArrayList<Block<R>>();
         int captureStart=0;
-        long captureTarget=actual[target];
+        long captureTarget=actual[target],lowTarget=actual[target];
+        int lowStart=0;
         while(result.explored<batches) {
             if(probeExpired(allowance)) return result;
             if(BigInteger.valueOf(actual[target]).compareTo(goal[target])>=0) break;
@@ -236,10 +263,11 @@ public final class ProductionPlanner<K, R> {
                 if(missing.signum()<=0) continue;
                 for(int r:producers[key]) {
                     if(probeExpired(allowance)) return result;
-                    var rounds=missing.add(outputs[r][key]).subtract(ONE).divide(outputs[r][key]);
+                    if(!reachable[r])continue;
+                    var rounds=missing.add(outputs[r].get(key)).subtract(ONE).divide(outputs[r].get(key));
                     for(int k:inputIndices[r]) {
                         if(probeExpired(allowance)) return result;
-                        hints[k]=hints[k].max(rounds.multiply(inputs[r][k]));
+                        hints[k]=hints[k].max(rounds.multiply(inputs[r].get(k)));
                     }
                 }
             }
@@ -255,9 +283,9 @@ public final class ProductionPlanner<K, R> {
                 var d=delta(r); BigInteger count=ZERO;
                 for(int k:outputIndices[r]) {
                     if(probeExpired(allowance)) return result;
-                    if(d[k].signum()>0 && hints[k].compareTo(BigInteger.valueOf(actual[k]))>0) {
+                    if(d.get(k).signum()>0 && hints[k].compareTo(BigInteger.valueOf(actual[k]))>0) {
                         var deficit=hints[k].subtract(BigInteger.valueOf(actual[k]));
-                        count=count.max(deficit.add(d[k]).subtract(ONE).divide(d[k]));
+                        count=count.max(deficit.add(d.get(k)).subtract(ONE).divide(d.get(k)));
                     }
                 }
                 if(count.signum()==0) continue;
@@ -281,13 +309,16 @@ public final class ProductionPlanner<K, R> {
             // and its length need not fit a fixed ring window. Repetition is allowed
             // only by exact prefix-capital and peak bounds, then independently certified.
             int m=blocks.size();
-            if(actual[target]>captureTarget) {
+            if(actual[target]<lowTarget) {lowTarget=actual[target];lowStart=m;}
+            if(actual[target]>captureTarget || actual[target]>lowTarget) {
+                boolean highRise=actual[target]>captureTarget;
                 var word=new ArrayList<Step<R>>();
-                for(int i=captureStart;i<m;i++) {
+                for(int i=highRise?captureStart:lowStart;i<m;i++) {
                     if(probeExpired(allowance))return result;
                     word.addAll(blocks.get(i).word());
                 }
-                captureStart=m;captureTarget=actual[target];
+                if(highRise) {captureStart=m;captureTarget=actual[target];}
+                lowStart=m;lowTarget=actual[target];
                 var summary=summarize(word);var required=summary[0];var net=summary[1];var peak=summary[2];
                 if(net[target].signum()<=0) continue;
                 var remaining=goal[target].subtract(BigInteger.valueOf(actual[target]));
@@ -311,7 +342,7 @@ public final class ProductionPlanner<K, R> {
                 } catch(ArithmeticException overflow) { return result; }
                 blocks.add(new Block<>(List.copyOf(word),cycles.longValueExact()));
                 result.explored++;
-                captureStart=blocks.size();captureTarget=actual[target];
+                captureStart=blocks.size();captureTarget=actual[target];lowStart=captureStart;lowTarget=captureTarget;
             }
         }
         if(BigInteger.valueOf(actual[target]).compareTo(goal[target])<0 || probeExpired(allowance)) return result;
@@ -330,9 +361,33 @@ public final class ProductionPlanner<K, R> {
         if(!expired() && certified.status==Status.FEASIBLE) result.feasible=certified;
         return result;
     }
+    /** Failed regional construction contributes no reachability or shortage claim. */
+    private Result<K,R> scc(int target,BigInteger[] goal,long increment) {
+        if(!allowSccCandidate || limits.states<64 || expired())return null;
+        long candidateStarted=System.nanoTime(),allowance=Math.min(200_000_000L,limits.nanos/8);
+        var graph=compiled(Math.min(limits.nanos,System.nanoTime()-started+allowance));
+        if(graph==null)return null;
+        var candidate=SccCandidatePlanner.candidate(graph,stock,target,increment,
+                new Limits(Math.min(limits.states,4096),allowance),
+                ()->expired() || System.nanoTime()-candidateStarted>=allowance);
+        if(candidate==null || expired())return null;
+        Node witness=new Node(goal,null,null);
+        for(int i=candidate.program().size()-1;i>=0;i--) {
+            if(expired())return null;
+            var block=candidate.program().get(i);var word=new ArrayList<Step<R>>();
+            for(var step:block.word())word.add(new Step<>(recipes.get(step.recipe()).id,step.count()));
+            witness=new Node(goal,witness,new Block<>(word,block.repetitions()));
+        }
+        try {
+            var certified=certify(witness,target,increment,candidate.explored());
+            if(!expired() && certified.status==Status.FEASIBLE) {sccFastPath=true;return certified;}
+        } catch(CancellationException canceled) {throw canceled;}
+        catch(IllegalStateException rejected) { /* Keep the general solver authoritative. */ }
+        return null;
+    }
     public Result<K,R> solve(K target, long increment) {
         if(increment<=0) throw new IllegalArgumentException("Increment must be positive");
-        started=System.nanoTime(); fair.clear(); clipped=false; serial=0;dagFastPath=false;resourceBound=false;
+        started=System.nanoTime(); fair.clear(); clipped=false; serial=0;dagFastPath=false;resourceBound=false;sccFastPath=false;
         int targetIndex=keys.indexOf(target);
         if(targetIndex<0) return failure(Status.UNREACHABLE,0);
         var goal=vector(); goal[targetIndex]=stock[targetIndex].add(BigInteger.valueOf(increment));
@@ -348,6 +403,7 @@ public final class ProductionPlanner<K, R> {
         }
         var attempt=probe(targetIndex,goal,increment);
         if(attempt.feasible!=null) return attempt.feasible;
+        var regional=scc(targetIndex,goal,increment);if(regional!=null)return regional;
         var queue=new PriorityQueue<Node>(Comparator.comparingDouble((Node n)->n.score).thenComparingLong(n->n.order));
         var basis=new ArrayList<Node>();
         Node root=new Node(goal,null,null); queue.add(root); fair.add(root); basis.add(root);
@@ -372,10 +428,10 @@ public final class ProductionPlanner<K, R> {
                 var d=delta(r);
                 long batch=jump(node.need,d);
                 // Accelerators add edges; the ordinary one-step predecessor is NEVER omitted.
-                if(batch>1 && offer(new Node(pre(node.need,inputs[r],d,batch),node,
+                if(batch>1 && offer(new Node(SparsePreimage.apply(node.need,inputs[r],d,batch,touchedKeyIndices[r]),node,
                         new Block<>(List.of(new Step<>(recipes.get(r).id,batch)),1)),basis,queue))
                     return failure(Status.LIMIT,explored);
-                Node child=new Node(pre(node.need,inputs[r],d,1),node,
+                Node child=new Node(SparsePreimage.apply(node.need,inputs[r],d,1,touchedKeyIndices[r]),node,
                         new Block<>(List.of(new Step<>(recipes.get(r).id,1)),1));
                 if(offer(child,basis,queue)) return failure(Status.LIMIT,explored);
                 // Compose any short word, not a named two-node ring. Repeating a word
@@ -431,9 +487,9 @@ public final class ProductionPlanner<K, R> {
             if(Thread.currentThread().isInterrupted())throw new CancellationException("Production planning cancelled");
             int r=recipeIds.get(step.recipe); var d=delta(r); BigInteger n=BigInteger.valueOf(step.count);
             for(int k=0;k<keys.size();k++) {
-                BigInteger seed=inputs[r][k].add(d[k].negate().max(ZERO).multiply(n.subtract(ONE)));
+                BigInteger seed=inputs[r].get(k).add(d.get(k).negate().max(ZERO).multiply(n.subtract(ONE)));
                 required[k]=required[k].max(seed.subtract(change[k]));
-                change[k]=change[k].add(d[k].multiply(n));
+                change[k]=change[k].add(d.get(k).multiply(n));
                 peak[k]=peak[k].max(change[k]);
             }
         }

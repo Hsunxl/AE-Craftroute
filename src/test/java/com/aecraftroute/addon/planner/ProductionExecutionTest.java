@@ -66,7 +66,7 @@ class ProductionExecutionTest {
             var containers = new KeyCounter();
             var inputs = job.extract(pattern, inventory, null, outputs, containers);
             if (inputs == null) return false;
-            job.accepted(pattern);
+            if(!job.dispatch(pattern,inputs,()->{},()->true))return false;
             register(outputs);
             register(containers);
             long left = tasks.getOrDefault(pattern, 0L) - 1;
