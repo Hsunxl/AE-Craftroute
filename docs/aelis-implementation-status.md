@@ -38,3 +38,15 @@
 5. 大网冷/热缓存性能测量，完整游戏内验收。
 
 前一轮误认的 GTNH AE2IS 分层多 CPU 实现不是本项目来源。算法分区也不等于可安全跨 CPU 拆单。
+
+## 2026-10-29 local.66 发布与本地安装
+
+- 版本：1.13.19-local.66-dev。源码提交 faf6f60812362f0e7943896f382e9dbef938a04f，分支 wip/planner-vm-ui-2026-10-25，标签 v1.13.19-local.66-dev，已推送。
+- GitHub 预发布：https://github.com/Hsunxl/AE-Craftroute/releases/tag/v1.13.19-local.66-dev。
+- 发布附件：成品 683,813 字节、源码包 338,061 字节、SHA256SUMS-local66.txt；远端资产 digest 与本地逐项一致。
+- 成品 SHA-256：e5692db6e97bc17e0424b9a5ae803363d4fa0bedd5aa4bd7b1bd81ad83616252。
+- local.66 发布门禁：test 与 routeFunctionalTest 各 674 项，0 failures / 0 errors；build 成功，日志 build/release-local66-gate.log。
+- 已安装：D:/pcl/versions/ATM10/mods/aecraftroute-1.13.19-local.66-dev_neoforge_1.21.1.jar，校验值与发布附件一致；mods 中仅一份 aecraftroute jar。
+- 旧包备份：D:/pcl/versions/ATM10/mods-backup/local66-20261029-213653/aecraftroute-1.13.19-local.65-dev_neoforge_1.21.1.jar。
+- 备份 SHA-256：aa9ea41711c3012a397a0b18013578081a6d9cb77752fc66b1bfb9dbe28c296c。备份目录 installation.json 保存安装清单。
+- 用户确认运行中的 Minecraft 是其他实例；没有终止任何游戏进程。本轮没有启动 ATM10 客户端或声称已完成其游戏内验收。
